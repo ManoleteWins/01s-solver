@@ -1084,6 +1084,9 @@ class SolverGUI:
         # Range density plot
         self.ax_range.clear()
         density = weights
+        max_density = density.max()
+        if max_density > 1e-15:
+            density = density / max_density
 
         # Stacked by action: show how the range splits across actions
         bottom = np.zeros(self.solver.D)

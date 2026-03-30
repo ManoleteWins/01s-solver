@@ -19,11 +19,13 @@ class Action:
 
     def label(self) -> str:
         if self.type == 'bet':
-            return f"Bet {self.size:.0%}"
+            return f"Bet {self.size:.0%} ({self.amount:.1f})"
         if self.type == 'raise':
-            return f"Raise {self.size:.0%}"
+            return f"Raise {self.size:.0%} ({self.amount:.1f})"
         if self.type == 'allin':
-            return "All-in"
+            return f"All-in ({self.amount:.1f})"
+        if self.type == 'call':
+            return f"Call ({self.amount:.1f})"
         return self.type.capitalize()
 
 
