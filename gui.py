@@ -106,6 +106,13 @@ class SolverGUI:
         ttk.Entry(f, textvariable=self.iter_var, width=8).grid(row=row, column=1, sticky="w")
         row += 1
 
+        ttk.Label(f, text="Threads:").grid(row=row, column=0, sticky="w")
+        self.threads_var = tk.IntVar(value=1)
+        ttk.Spinbox(f, from_=1, to=64, textvariable=self.threads_var, width=5).grid(
+            row=row, column=1, sticky="w"
+        )
+        row += 1
+
         # ── Dynamic sections placeholder ──
         self.dynamic_start_row = row
         self.dynamic_frame = ttk.Frame(f)
@@ -217,6 +224,11 @@ class SolverGUI:
         self.canvas = FigureCanvasTkAgg(self.fig, master=parent)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+        # Hover tooltip
+        self._hover_data = None  # (strategy, actions, equity) for current plot
+        self._annotation = None
+        self.fig.canvas.mpl_connect('motion_notify_event', self._on_hover)
+
         # Navigation state: unified game tree
         self._current_history = ()
         # node_map: {history: (player, actions)} — which player acts and what actions
@@ -293,10 +305,17 @@ class SolverGUI:
         self.progress_var.set(0)
 
         total = self.iter_var.get()
+        num_threads = self.threads_var.get()
 
         def worker():
             try:
-                self.solver.train(total, callback=self._progress_callback)
+                if num_threads > 1:
+                    self.solver.train_parallel(total, num_threads,
+                                               callback=self._progress_callback)
+                else:
+                    self.solver.train(total, callback=self._progress_callback)
+            except StopIteration:
+                pass
             except Exception as e:
                 self.root.after(0, lambda: messagebox.showerror("Solver Error", str(e)))
             finally:
@@ -967,9 +986,69 @@ class SolverGUI:
         self.ax_range.set_title("Range (weighted by reach)", fontsize=9)
         self.ax_range.grid(True, alpha=0.3)
 
+        # Store data for hover tooltip
+        self._hover_data = (strategy, actions, equity, density)
+
         self.canvas.draw()
 
+    def _on_hover(self, event):
+        """Show action frequencies when hovering over the strategy chart."""
+        if self._hover_data is None or self.solver is None:
+            if self._annotation:
+                self._annotation.set_visible(False)
+                self.canvas.draw_idle()
+            return
+
+        # Only respond to hover on the strategy axes
+        if event.inaxes not in (self.ax, self.ax_range):
+            if self._annotation:
+                self._annotation.set_visible(False)
+                self.canvas.draw_idle()
+            return
+
+        x = event.xdata
+        if x is None or x < 0 or x > 1:
+            if self._annotation:
+                self._annotation.set_visible(False)
+                self.canvas.draw_idle()
+            return
+
+        strategy, actions, equity, density = self._hover_data
+        D = self.solver.D
+        hand_values = self.solver.hand_values
+
+        # Find nearest bucket
+        idx = int(np.clip(np.round(x * D - 0.5), 0, D - 1))
+        hand_val = hand_values[idx]
+
+        # Build tooltip text
+        lines = [f"Hand: {hand_val:.3f}"]
+        for a_idx, action in enumerate(actions):
+            pct = strategy[idx, a_idx] * 100
+            lines.append(f"  {action.label()}: {pct:.1f}%")
+        if equity is not None:
+            lines.append(f"  Equity: {equity[idx]:.1%}")
+        if density is not None:
+            lines.append(f"  Density: {density[idx]:.4f}")
+        text = "\n".join(lines)
+
+        # Create or update annotation
+        if self._annotation is None:
+            self._annotation = self.ax.annotate(
+                text, xy=(hand_val, 0.5),
+                xytext=(10, 10), textcoords="offset points",
+                fontsize=8, fontfamily="monospace",
+                bbox=dict(boxstyle="round,pad=0.4", fc="lightyellow", ec="gray", alpha=0.95),
+                zorder=100)
+        else:
+            self._annotation.set_text(text)
+            self._annotation.xy = (hand_val, 0.5)
+            self._annotation.set_visible(True)
+
+        self.canvas.draw_idle()
+
     def _clear_plot(self):
+        self._hover_data = None
         self.ax.clear()
         self.ax.set_xlim(0, 1)
         self.ax.set_ylim(0, 1)
