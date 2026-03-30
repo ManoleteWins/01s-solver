@@ -638,86 +638,85 @@ class SolverGUI:
         # Ensure last is 1
         boundaries[-1] = 1.0
 
-        rule_rows = []       # [(boundary_var, slider_vars, row_frame), ...]
+        rule_rows = []       # [(boundary_var, slider_vars, _modified), ...]
         boundary_labels = [] # ttk.Labels showing "from" values
-
-        _header_frame = [None]
+        _all_widgets = []    # all widgets in rules_frame for cleanup
 
         def rebuild_rows():
-            """Rebuild all rule rows from current state."""
-            if _header_frame[0]:
-                _header_frame[0].destroy()
-            for _, _, _, rf in rule_rows:
-                rf.destroy()
+            """Rebuild all rows in a single grid inside rules_frame."""
+            for w in _all_widgets:
+                w.destroy()
+            _all_widgets.clear()
             rule_rows.clear()
             boundary_labels.clear()
 
-            # Header row
-            hf = ttk.Frame(rules_frame)
-            hf.pack(fill=tk.X, pady=(0, 4))
-            _header_frame[0] = hf
-            ttk.Label(hf, text="From", width=6, anchor="center").grid(row=0, column=0, padx=2)
-            ttk.Label(hf, text="To", width=6, anchor="center").grid(row=0, column=1, padx=2)
-            col = 2
+            # Header (row 0)
+            def _h(text, col):
+                w = ttk.Label(rules_frame, text=text, anchor="center", font=("", 8, "bold"))
+                w.grid(row=0, column=col, padx=2, pady=(0, 4), sticky="ew")
+                _all_widgets.append(w)
+
+            _h("From", 0)
+            _h("To", 1)
             for a_idx, a in enumerate(actions):
-                # Match the slider frame layout: checkbox + scale(70) + label(4)
-                lf = ttk.Frame(hf)
-                lf.grid(row=0, column=col + a_idx, padx=1)
-                ttk.Label(lf, text=a.label(), anchor="center").pack()
+                _h(a.label(), 2 + a_idx)
+            _h("", 2 + num_actions)      # split
+            _h("", 2 + num_actions + 1)  # remove
 
             for row_idx in range(len(boundaries) - 1):
                 probs = initial_rules[row_idx][2] if row_idx < len(initial_rules) else None
                 _add_row(row_idx, probs)
 
         def _add_row(row_idx, probs=None):
-            row_frame = ttk.Frame(rules_frame)
-            row_frame.pack(fill=tk.X, pady=2)
-            col = 0
+            gr = row_idx + 1  # grid row (0 = header)
 
-            # From label (driven by previous boundary)
-            from_lbl = ttk.Label(row_frame, text=f"{boundaries[row_idx]:.2f}", width=6, anchor="center")
-            from_lbl.grid(row=0, column=col, padx=2)
+            # From label
+            from_lbl = ttk.Label(rules_frame, text=f"{boundaries[row_idx]:.2f}",
+                                 width=6, anchor="center")
+            from_lbl.grid(row=gr, column=0, padx=2, pady=1)
+            _all_widgets.append(from_lbl)
             boundary_labels.append(from_lbl)
-            col += 1
 
-            # To: editable for interior boundaries, fixed "1.00" for last row
+            # To
             is_last = (row_idx == len(boundaries) - 2)
             bnd_var = tk.DoubleVar(value=boundaries[row_idx + 1])
 
             if is_last:
-                ttk.Label(row_frame, text="1.00", width=6, anchor="center").grid(row=0, column=col, padx=2)
+                w = ttk.Label(rules_frame, text="1.00", width=6, anchor="center")
+                w.grid(row=gr, column=1, padx=2, pady=1)
+                _all_widgets.append(w)
             else:
-                bnd_entry = ttk.Entry(row_frame, textvariable=bnd_var, width=6)
-                bnd_entry.grid(row=0, column=col, padx=2)
+                bnd_entry = ttk.Entry(rules_frame, textvariable=bnd_var, width=6)
+                bnd_entry.grid(row=gr, column=1, padx=2, pady=1)
+                _all_widgets.append(bnd_entry)
 
                 def on_boundary_change(*args, idx=row_idx):
                     try:
                         val = bnd_var.get()
                     except tk.TclError:
                         return
-                    # Clamp between neighbors
                     lo = boundaries[idx] + 0.01
                     hi = boundaries[idx + 2] - 0.01 if idx + 2 < len(boundaries) else 0.99
                     val = max(lo, min(hi, val))
                     boundaries[idx + 1] = round(val, 2)
-                    # Update next row's from label
                     if idx + 1 < len(boundary_labels):
                         boundary_labels[idx + 1].config(text=f"{boundaries[idx + 1]:.2f}")
 
                 bnd_var.trace_add('write', on_boundary_change)
 
-            # Linked action sliders with per-slider pin locks
+            # Action sliders
             slider_vars = []
             sliders = []
             labels_list = []
-            pin_vars = []   # BooleanVar: True = pinned (won't move)
+            pin_vars = []
             _updating = [False]
-            _modified = [False]  # True if user touched any slider in this row
+            _modified = [False]
 
-            col += 1
             for a_idx in range(num_actions):
-                sf = ttk.Frame(row_frame)
-                sf.grid(row=0, column=col + a_idx, padx=1, sticky="ew")
+                sf = ttk.Frame(rules_frame)
+                sf.grid(row=gr, column=2 + a_idx, padx=1, pady=1, sticky="ew")
+                _all_widgets.append(sf)
+
                 val = int(round((probs[a_idx] if probs else 1.0 / num_actions) * 100))
                 sv = tk.IntVar(value=val)
                 pv = tk.BooleanVar(value=False)
@@ -742,14 +741,11 @@ class SolverGUI:
                 _modified[0] = True
 
                 new_val = slider_vars[changed_idx].get()
-                # "others" = unlocked sliders that aren't the one being moved
                 others = [i for i in range(num_actions)
                           if i != changed_idx and not pin_vars[i].get()]
                 pinned_sum = sum(slider_vars[i].get() for i in range(num_actions)
                                 if i != changed_idx and pin_vars[i].get())
-                remaining = 100 - new_val - pinned_sum
-                remaining = max(0, remaining)
-
+                remaining = max(0, 100 - new_val - pinned_sum)
                 old_others_sum = sum(slider_vars[i].get() for i in others)
 
                 if old_others_sum > 0 and others:
@@ -767,37 +763,34 @@ class SolverGUI:
                     for i in others:
                         slider_vars[i].set(0)
 
-                # Fix rounding among unlocked
                 total = sum(sv.get() for sv in slider_vars)
                 if total != 100 and others:
                     slider_vars[others[-1]].set(slider_vars[others[-1]].get() + (100 - total))
 
                 for i in range(num_actions):
                     labels_list[i].config(text=f"{slider_vars[i].get()}%")
-
                 _updating[0] = False
 
             for a_idx in range(num_actions):
                 sliders[a_idx].config(
-                    command=lambda val, idx=a_idx: on_slider_change(idx)
-                )
+                    command=lambda val, idx=a_idx: on_slider_change(idx))
 
-            # Split button: split this row into two at midpoint
+            # Split button
             def split_row(idx=row_idx):
                 mid = round((boundaries[idx] + boundaries[idx + 1]) / 2, 2)
                 boundaries.insert(idx + 1, mid)
-                # Duplicate current probs for the new rule
                 cur_probs = [sv.get() / 100.0 for sv in slider_vars]
                 initial_rules.insert(idx + 1, (mid, boundaries[idx + 2], cur_probs))
                 if idx < len(initial_rules):
                     initial_rules[idx] = (boundaries[idx], mid, cur_probs)
                 rebuild_rows()
 
-            btn_col = col + num_actions
-            ttk.Button(row_frame, text="/", width=2, command=split_row).grid(
-                row=0, column=btn_col, padx=2)
+            btn_col = 2 + num_actions
+            sb = ttk.Button(rules_frame, text="/", width=2, command=split_row)
+            sb.grid(row=gr, column=btn_col, padx=2, pady=1)
+            _all_widgets.append(sb)
 
-            # Remove button (only if more than 1 row)
+            # Remove button
             def remove_row(idx=row_idx):
                 if len(boundaries) <= 2:
                     return
@@ -806,10 +799,11 @@ class SolverGUI:
                     initial_rules.pop(idx)
                 rebuild_rows()
 
-            ttk.Button(row_frame, text="X", width=2, command=remove_row).grid(
-                row=0, column=btn_col + 1, padx=2)
+            rb = ttk.Button(rules_frame, text="X", width=2, command=remove_row)
+            rb.grid(row=gr, column=btn_col + 1, padx=2, pady=1)
+            _all_widgets.append(rb)
 
-            entry = (bnd_var, slider_vars, _modified, row_frame)
+            entry = (bnd_var, slider_vars, _modified)
             rule_rows.append(entry)
 
         rebuild_rows()
@@ -822,7 +816,7 @@ class SolverGUI:
 
             # Only override bands that were actually modified
             modified_rules = []
-            for row_idx, (_, slider_vars, modified_flag, _) in enumerate(rule_rows):
+            for row_idx, (_, slider_vars, modified_flag) in enumerate(rule_rows):
                 if modified_flag[0]:
                     lo = boundaries[row_idx]
                     hi = boundaries[row_idx + 1]
