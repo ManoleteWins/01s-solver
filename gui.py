@@ -618,15 +618,7 @@ class SolverGUI:
                   "Sliders are linked — adjusting one rebalances the others.",
                   font=("", 8), wraplength=650).pack(padx=10, pady=(0, 10))
 
-        # Header
-        header = ttk.Frame(dlg)
-        header.pack(fill=tk.X, padx=10)
-        ttk.Label(header, text="From", width=6).pack(side=tk.LEFT, padx=2)
-        ttk.Label(header, text="To", width=6).pack(side=tk.LEFT, padx=2)
-        for a in actions:
-            ttk.Label(header, text=a.label(), width=12, anchor="center").pack(side=tk.LEFT, padx=2)
-
-        # Scrollable rules area
+        # Scrollable rules area (header is inside as first row)
         rules_canvas = tk.Canvas(dlg, height=320)
         rules_scroll = ttk.Scrollbar(dlg, orient=tk.VERTICAL, command=rules_canvas.yview)
         rules_frame = ttk.Frame(rules_canvas)
@@ -649,12 +641,29 @@ class SolverGUI:
         rule_rows = []       # [(boundary_var, slider_vars, row_frame), ...]
         boundary_labels = [] # ttk.Labels showing "from" values
 
+        _header_frame = [None]
+
         def rebuild_rows():
             """Rebuild all rule rows from current state."""
+            if _header_frame[0]:
+                _header_frame[0].destroy()
             for _, _, _, rf in rule_rows:
                 rf.destroy()
             rule_rows.clear()
             boundary_labels.clear()
+
+            # Header row
+            hf = ttk.Frame(rules_frame)
+            hf.pack(fill=tk.X, pady=(0, 4))
+            _header_frame[0] = hf
+            ttk.Label(hf, text="From", width=6, anchor="center").grid(row=0, column=0, padx=2)
+            ttk.Label(hf, text="To", width=6, anchor="center").grid(row=0, column=1, padx=2)
+            col = 2
+            for a_idx, a in enumerate(actions):
+                # Match the slider frame layout: checkbox + scale(70) + label(4)
+                lf = ttk.Frame(hf)
+                lf.grid(row=0, column=col + a_idx, padx=1)
+                ttk.Label(lf, text=a.label(), anchor="center").pack()
 
             for row_idx in range(len(boundaries) - 1):
                 probs = initial_rules[row_idx][2] if row_idx < len(initial_rules) else None
@@ -663,21 +672,23 @@ class SolverGUI:
         def _add_row(row_idx, probs=None):
             row_frame = ttk.Frame(rules_frame)
             row_frame.pack(fill=tk.X, pady=2)
+            col = 0
 
             # From label (driven by previous boundary)
-            from_lbl = ttk.Label(row_frame, text=f"{boundaries[row_idx]:.2f}", width=6)
-            from_lbl.pack(side=tk.LEFT, padx=2)
+            from_lbl = ttk.Label(row_frame, text=f"{boundaries[row_idx]:.2f}", width=6, anchor="center")
+            from_lbl.grid(row=0, column=col, padx=2)
             boundary_labels.append(from_lbl)
+            col += 1
 
             # To: editable for interior boundaries, fixed "1.00" for last row
             is_last = (row_idx == len(boundaries) - 2)
             bnd_var = tk.DoubleVar(value=boundaries[row_idx + 1])
 
             if is_last:
-                ttk.Label(row_frame, text="1.00", width=6).pack(side=tk.LEFT, padx=2)
+                ttk.Label(row_frame, text="1.00", width=6, anchor="center").grid(row=0, column=col, padx=2)
             else:
                 bnd_entry = ttk.Entry(row_frame, textvariable=bnd_var, width=6)
-                bnd_entry.pack(side=tk.LEFT, padx=2)
+                bnd_entry.grid(row=0, column=col, padx=2)
 
                 def on_boundary_change(*args, idx=row_idx):
                     try:
@@ -701,10 +712,12 @@ class SolverGUI:
             labels_list = []
             pin_vars = []   # BooleanVar: True = pinned (won't move)
             _updating = [False]
+            _modified = [False]  # True if user touched any slider in this row
 
+            col += 1
             for a_idx in range(num_actions):
                 sf = ttk.Frame(row_frame)
-                sf.pack(side=tk.LEFT, padx=1)
+                sf.grid(row=0, column=col + a_idx, padx=1, sticky="ew")
                 val = int(round((probs[a_idx] if probs else 1.0 / num_actions) * 100))
                 sv = tk.IntVar(value=val)
                 pv = tk.BooleanVar(value=False)
@@ -726,6 +739,7 @@ class SolverGUI:
                 if _updating[0]:
                     return
                 _updating[0] = True
+                _modified[0] = True
 
                 new_val = slider_vars[changed_idx].get()
                 # "others" = unlocked sliders that aren't the one being moved
@@ -779,7 +793,9 @@ class SolverGUI:
                     initial_rules[idx] = (boundaries[idx], mid, cur_probs)
                 rebuild_rows()
 
-            ttk.Button(row_frame, text="/", width=2, command=split_row).pack(side=tk.LEFT, padx=2)
+            btn_col = col + num_actions
+            ttk.Button(row_frame, text="/", width=2, command=split_row).grid(
+                row=0, column=btn_col, padx=2)
 
             # Remove button (only if more than 1 row)
             def remove_row(idx=row_idx):
@@ -790,9 +806,10 @@ class SolverGUI:
                     initial_rules.pop(idx)
                 rebuild_rows()
 
-            ttk.Button(row_frame, text="X", width=2, command=remove_row).pack(side=tk.LEFT, padx=2)
+            ttk.Button(row_frame, text="X", width=2, command=remove_row).grid(
+                row=0, column=btn_col + 1, padx=2)
 
-            entry = (bnd_var, slider_vars, row_frame)
+            entry = (bnd_var, slider_vars, _modified, row_frame)
             rule_rows.append(entry)
 
         rebuild_rows()
@@ -800,17 +817,20 @@ class SolverGUI:
         def apply_strategy():
             D = self.solver.D
             hand_values = self.solver.hand_values
-            strategy = np.full((D, num_actions), 1.0 / num_actions)
+            # Start with the original per-hand strategy
+            strategy = current.copy()
 
-            rules = []
-            for row_idx, (_, slider_vars, _) in enumerate(rule_rows):
-                lo = boundaries[row_idx]
-                hi = boundaries[row_idx + 1]
-                probs = [sv.get() / 100.0 for sv in slider_vars]
-                rules.append((lo, hi, probs))
+            # Only override bands that were actually modified
+            modified_rules = []
+            for row_idx, (_, slider_vars, modified_flag, _) in enumerate(rule_rows):
+                if modified_flag[0]:
+                    lo = boundaries[row_idx]
+                    hi = boundaries[row_idx + 1]
+                    probs = [sv.get() / 100.0 for sv in slider_vars]
+                    modified_rules.append((lo, hi, probs))
 
             for i, val in enumerate(hand_values):
-                for lo, hi, probs in rules:
+                for lo, hi, probs in modified_rules:
                     if lo <= val <= hi:
                         strategy[i] = probs
                         break
