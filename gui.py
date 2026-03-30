@@ -92,7 +92,7 @@ class SolverGUI:
         row += 1
 
         ttk.Label(f, text="Starting pot:").grid(row=row, column=0, sticky="w")
-        self.pot_var = tk.DoubleVar(value=2.0)
+        self.pot_var = tk.DoubleVar(value=10.0)
         ttk.Entry(f, textvariable=self.pot_var, width=8).grid(row=row, column=1, sticky="w")
         row += 1
 
@@ -102,12 +102,12 @@ class SolverGUI:
         row += 1
 
         ttk.Label(f, text="Iterations:").grid(row=row, column=0, sticky="w")
-        self.iter_var = tk.IntVar(value=1000)
+        self.iter_var = tk.IntVar(value=10000)
         ttk.Entry(f, textvariable=self.iter_var, width=8).grid(row=row, column=1, sticky="w")
         row += 1
 
         ttk.Label(f, text="Threads:").grid(row=row, column=0, sticky="w")
-        self.threads_var = tk.IntVar(value=1)
+        self.threads_var = tk.IntVar(value=32)
         ttk.Spinbox(f, from_=1, to=64, textvariable=self.threads_var, width=5).grid(
             row=row, column=1, sticky="w"
         )
@@ -128,6 +128,9 @@ class SolverGUI:
 
         self.stop_btn = ttk.Button(btn_frame, text="Stop", command=self._stop_solver, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.LEFT, padx=5)
+
+        self.exploit_btn = ttk.Button(btn_frame, text="Range Exploit", command=self._show_range_exploit_dialog)
+        self.exploit_btn.pack(side=tk.LEFT, padx=5)
         row += 1
 
         self.progress_var = tk.DoubleVar(value=0)
@@ -194,7 +197,7 @@ class SolverGUI:
             ttk.Label(f, text=f"Street {s + 1} max raises:").grid(
                 row=row, column=0, sticky="w"
             )
-            mrvar = tk.IntVar(value=1)
+            mrvar = tk.IntVar(value=2)
             ttk.Spinbox(f, from_=0, to=10, textvariable=mrvar, width=5).grid(
                 row=row, column=1, sticky="w"
             )
@@ -277,15 +280,27 @@ class SolverGUI:
             return None
 
     def _config_matches(self, cfg: GameConfig) -> bool:
-        """Check if config matches the solver's config (so we can reuse it)."""
+        """Check if config matches the solver's config exactly."""
         if not hasattr(self, '_last_config') or self._last_config is None:
             return False
         old = self._last_config
-        return (old.num_players == cfg.num_players and
-                old.num_streets == cfg.num_streets and
-                old.discretization == cfg.discretization and
-                old.starting_pot == cfg.starting_pot and
-                old.starting_stack == cfg.starting_stack)
+        if (old.num_players != cfg.num_players or
+                old.num_streets != cfg.num_streets or
+                old.discretization != cfg.discretization or
+                old.starting_pot != cfg.starting_pot or
+                old.starting_stack != cfg.starting_stack):
+            return False
+        if len(old.street_configs) != len(cfg.street_configs):
+            return False
+        for a, b in zip(old.street_configs, cfg.street_configs):
+            if a.bet_sizes != b.bet_sizes or a.raise_sizes != b.raise_sizes or a.max_raises != b.max_raises:
+                return False
+        if len(old.range_configs) != len(cfg.range_configs):
+            return False
+        for a, b in zip(old.range_configs, cfg.range_configs):
+            if a.intervals != b.intervals:
+                return False
+        return True
 
     # ─── Solver Control ──────────────────────────────────────────
 
@@ -839,6 +854,85 @@ class SolverGUI:
         self._render_navigation()
         self._render_current_strategy()
 
+    def _show_range_exploit_dialog(self):
+        """Dialog to remove hands from a player's range and find the exploit."""
+        if self.solver is None:
+            messagebox.showinfo("Info", "Run solver first to establish baseline strategies.")
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Range Lock & Exploit")
+        dlg.geometry("450x350")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        ttk.Label(dlg, text="Range Lock & Exploit", font=("", 11, "bold")).pack(pady=(10, 5))
+        ttk.Label(dlg, text="Lock a player's entire strategy tree, remove hands\n"
+                  "from their range, then re-solve to find the opponent's\n"
+                  "maximum EV exploit.",
+                  font=("", 8), justify="center").pack(pady=(0, 10))
+
+        frame = ttk.Frame(dlg)
+        frame.pack(padx=20, fill=tk.X)
+
+        # Player selection
+        ttk.Label(frame, text="Lock player:").grid(row=0, column=0, sticky="w", pady=3)
+        player_var = tk.IntVar(value=1)
+        player_combo = ttk.Combobox(frame, state="readonly", width=10)
+        player_combo['values'] = [f"Player {p+1}" for p in range(self.solver.N)]
+        player_combo.current(0)
+        player_combo.grid(row=0, column=1, sticky="w", pady=3)
+
+        # Current range display
+        ttk.Label(frame, text="Current range:").grid(row=1, column=0, sticky="w", pady=3)
+        range_lbl = ttk.Label(frame, text="", font=("", 8))
+        range_lbl.grid(row=1, column=1, sticky="w", pady=3)
+
+        def update_range_display(*args):
+            p = player_combo.current()
+            rc = self.solver.config.range_configs[p]
+            range_lbl.config(text=str(rc))
+        player_combo.bind("<<ComboboxSelected>>", update_range_display)
+        update_range_display()
+
+        # Hands to remove
+        ttk.Label(frame, text="Remove hands:").grid(row=2, column=0, sticky="w", pady=3)
+        remove_var = tk.StringVar(value="")
+        ttk.Entry(frame, textvariable=remove_var, width=25).grid(row=2, column=1, sticky="w", pady=3)
+        ttk.Label(frame, text='Format: "0.3-0.5, 0.8-0.9"', font=("", 8)).grid(
+            row=3, column=1, sticky="w")
+
+        def apply_exploit():
+            p = player_combo.current()
+            remove_text = remove_var.get().strip()
+            if not remove_text:
+                messagebox.showerror("Error", "Enter hand ranges to remove.")
+                return
+
+            try:
+                from config import RangeConfig
+                removed = RangeConfig.parse(remove_text)
+            except Exception as e:
+                messagebox.showerror("Error", f"Invalid range format: {e}")
+                return
+
+            self.solver.range_lock_exploit(p, removed.intervals)
+            dlg.destroy()
+            self.status_var.set(f"Range exploit: P{p+1} locked, removed {remove_text}. Run solver.")
+            self._populate_results()
+
+        def undo_exploit():
+            self.solver.undo_range_lock_exploit()
+            dlg.destroy()
+            self.status_var.set("Range exploit undone. All locks cleared, ranges restored.")
+            self._populate_results()
+
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.pack(pady=20)
+        ttk.Button(btn_frame, text="Apply & Lock", command=apply_exploit).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Undo All", command=undo_exploit).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT, padx=5)
+
     def _action_pill_color(self, action):
         if action.type in ('check', 'call'):
             return '#27ae60'
@@ -937,7 +1031,9 @@ class SolverGUI:
         self.ax.set_ylabel("Action Probability / Equity")
         title = f"Player {player + 1} — {self.solver.format_history(history)}"
         self.ax.set_title(title, fontsize=10)
-        self.ax.legend(loc='upper left', fontsize=9)
+        self.ax.legend(loc='upper left', fontsize=8, bbox_to_anchor=(1.01, 1),
+                       borderaxespad=0, framealpha=0.9)
+        self.fig.subplots_adjust(right=0.82)
         self.ax.grid(True, alpha=0.3)
 
         # Aggregate frequency bar

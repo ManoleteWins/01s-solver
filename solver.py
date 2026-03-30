@@ -457,6 +457,56 @@ class CFRSolver:
             return 'frequency'
         return None
 
+    def range_lock_exploit(self, player: int, removed_intervals: List[Tuple[float, float]]):
+        """Lock a player's entire strategy tree and remove hands from their range.
+
+        1. Strategy-locks every info set for `player` to current average strategy.
+        2. Zeros out `player`'s initial reach for hands in `removed_intervals`.
+        3. Resets regrets for all OTHER players so they re-solve from scratch.
+
+        After calling this, run train() to find opponents' max-EV exploit.
+        """
+        self._ensure_discovered()
+
+        # Lock all of this player's info sets
+        for (p, h), actions in self.info_sets.items():
+            if p == player:
+                avg = self.get_average_strategy(p, h, len(actions))
+                self.strategy_locks[(p, h)] = avg.copy()
+
+        # Remove hands from player's range
+        for i, val in enumerate(self.hand_values):
+            for lo, hi in removed_intervals:
+                if lo <= val <= hi:
+                    self.initial_reach[player][i] = 0.0
+                    break
+
+        # Reset opponent regrets so they re-solve fresh against the modified range
+        for (p, h) in list(self._index_map.keys()):
+            if p != player:
+                idx = self._index_map[(p, h)]
+                self.regret_data[idx] = 0.0
+                self.strategy_data[idx] = 0.0
+
+    def undo_range_lock_exploit(self):
+        """Remove all strategy locks and restore original ranges."""
+        self.strategy_locks.clear()
+
+        # Restore initial reach from config
+        self.initial_reach = []
+        for p in range(self.N):
+            reach = np.zeros(self.D)
+            rc = self.config.range_configs[p]
+            for i, val in enumerate(self.hand_values):
+                if rc.contains(val):
+                    reach[i] = 1.0 / self.D
+            self.initial_reach.append(reach)
+
+        # Reset all regrets for a clean re-solve
+        if self.regret_data is not None:
+            self.regret_data[:] = 0.0
+            self.strategy_data[:] = 0.0
+
     # ── Analysis ────────────────────────────────────────────────
 
     def compute_reach_at_node(self, target_history):
