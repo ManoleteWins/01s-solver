@@ -131,6 +131,9 @@ class SolverGUI:
 
         self.exploit_btn = ttk.Button(btn_frame, text="Range Exploit", command=self._show_range_exploit_dialog)
         self.exploit_btn.pack(side=tk.LEFT, padx=5)
+
+        self.reset_btn = ttk.Button(btn_frame, text="Reset", command=self._reset_all)
+        self.reset_btn.pack(side=tk.LEFT, padx=5)
         row += 1
 
         self.progress_var = tk.DoubleVar(value=0)
@@ -341,6 +344,23 @@ class SolverGUI:
 
     def _stop_solver(self):
         self._running = False
+
+    def _reset_all(self):
+        self.solver = None
+        self._last_config = None
+        self._node_map = {}
+        self._child_map = {}
+        self._current_history = ()
+        self._hover_data = None
+        self.progress_var.set(0)
+        self.status_var.set("Ready")
+        for w in self.breadcrumb_frame.winfo_children():
+            w.destroy()
+        for w in self.action_pill_frame.winfo_children():
+            w.destroy()
+        for w in self.lock_frame.winfo_children():
+            w.destroy()
+        self._clear_plot()
 
     def _progress_callback(self, current: int, total: int):
         if not self._running:
@@ -939,12 +959,12 @@ class SolverGUI:
         elif action.type == 'fold':
             return '#2980b9'
         elif action.type == 'allin':
-            return '#4A2000'
+            return '#8B0C12'
         elif action.type in ('bet', 'raise'):
             t = min(action.size / 2.0, 1.0)
-            r = int(0xCD + (0x5A - 0xCD) * t)
-            g = int(0x85 + (0x2D - 0x85) * t)
-            b = int(0x3F + (0x00 - 0x3F) * t)
+            r = int(0xFA + (0x8B - 0xFA) * t)
+            g = int(0x8E + (0x0C - 0x8E) * t)
+            b = int(0x82 + (0x12 - 0x82) * t)
             return f'#{r:02X}{g:02X}{b:02X}'
         return '#888888'
 
@@ -975,28 +995,25 @@ class SolverGUI:
         x = self.solver.hand_values
         labels = [a.label() for a in actions]
 
-        # Color mapping: check/call = green, fold = blue, bet/raise/allin = browns
-        # Darker brown = bigger size, all-in = darkest
-        brown_light = '#DEB887'  # lightest
-        brown_dark = '#4A2000'   # darkest
+        # Color mapping: check/call = green, fold = blue, bet/raise/allin = reds
+        # Lighter red = smaller size, darker red = bigger size (PioSOLVER style)
 
         # Collect all aggressive actions and sort by size for color assignment
         aggressive = [(i, a) for i, a in enumerate(actions) if a.type in ('bet', 'raise', 'allin')]
-        # Sort by size (all-in gets max size so it's always darkest)
         max_size = max((a.size for _, a in aggressive if a.type != 'allin'), default=1.0)
         def sort_key(pair):
             _, a = pair
             return max_size + 1 if a.type == 'allin' else a.size
         aggressive.sort(key=sort_key)
 
-        # Assign browns: interpolate from light to dark
+        # Assign reds: interpolate from light salmon to deep red
         agg_colors = {}
         n_agg = len(aggressive)
         for rank, (idx, a) in enumerate(aggressive):
             t = rank / max(n_agg - 1, 1)  # 0=lightest, 1=darkest
-            r = int(0xDE + (0x4A - 0xDE) * t)
-            g = int(0xB8 + (0x20 - 0xB8) * t)
-            b = int(0x87 + (0x00 - 0x87) * t)
+            r = int(0xFA + (0x8B - 0xFA) * t)  # 250 -> 139
+            g = int(0x8E + (0x0C - 0x8E) * t)  # 142 -> 12
+            b = int(0x82 + (0x12 - 0x82) * t)  # 130 -> 18
             agg_colors[idx] = f'#{r:02X}{g:02X}{b:02X}'
 
         colors = []
