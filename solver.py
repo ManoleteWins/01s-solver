@@ -457,11 +457,14 @@ class CFRSolver:
             return 'frequency'
         return None
 
-    def range_lock_exploit(self, player: int, removed_intervals: List[Tuple[float, float]]):
-        """Lock a player's entire strategy tree and remove hands from their range.
+    def range_lock_exploit(self, player: int, modifications):
+        """Lock a player's entire strategy tree and modify their range.
+
+        modifications: list of (lo, hi, keep_fraction) tuples.
+            keep_fraction=0 removes entirely, 0.5 keeps half, 1.0 keeps all.
 
         1. Strategy-locks every info set for `player` to current average strategy.
-        2. Zeros out `player`'s initial reach for hands in `removed_intervals`.
+        2. Scales `player`'s initial reach by keep_fraction for hands in each interval.
         3. Resets regrets for all OTHER players so they re-solve from scratch.
 
         After calling this, run train() to find opponents' max-EV exploit.
@@ -474,11 +477,11 @@ class CFRSolver:
                 avg = self.get_average_strategy(p, h, len(actions))
                 self.strategy_locks[(p, h)] = avg.copy()
 
-        # Remove hands from player's range
+        # Modify hands in player's range
         for i, val in enumerate(self.hand_values):
-            for lo, hi in removed_intervals:
+            for lo, hi, keep in modifications:
                 if lo <= val <= hi:
-                    self.initial_reach[player][i] = 0.0
+                    self.initial_reach[player][i] *= keep
                     break
 
         # Reset opponent regrets so they re-solve fresh against the modified range

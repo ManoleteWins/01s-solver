@@ -225,8 +225,8 @@ class SolverGUI:
         gs = GridSpec(3, 1, figure=self.fig, height_ratios=[4, 4, 0.6],
                       hspace=0.35, top=0.95, bottom=0.04)
         self.ax = self.fig.add_subplot(gs[0])          # strategy (top)
-        self.ax_range = self.fig.add_subplot(gs[1])     # range density (middle)
-        self.ax_freq = self.fig.add_subplot(gs[2])      # frequency bar (bottom)
+        self.ax_range = self.fig.add_subplot(gs[1])     # range density
+        self.ax_freq = self.fig.add_subplot(gs[2])      # aggregate frequency bar
         self.canvas = FigureCanvasTkAgg(self.fig, master=parent)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -896,7 +896,7 @@ class SolverGUI:
 
         dlg = tk.Toplevel(self.root)
         dlg.title("Range Lock & Exploit")
-        dlg.geometry("450x350")
+        dlg.geometry("450x450")
         dlg.transient(self.root)
         dlg.grab_set()
 
@@ -929,30 +929,69 @@ class SolverGUI:
         player_combo.bind("<<ComboboxSelected>>", update_range_display)
         update_range_display()
 
-        # Hands to remove
-        ttk.Label(frame, text="Remove hands:").grid(row=2, column=0, sticky="w", pady=3)
-        remove_var = tk.StringVar(value="")
-        ttk.Entry(frame, textvariable=remove_var, width=25).grid(row=2, column=1, sticky="w", pady=3)
-        ttk.Label(frame, text='Format: "0.3-0.5, 0.8-0.9"', font=("", 8)).grid(
-            row=3, column=1, sticky="w")
+        # Range modifications: multiple rows, each with range + keep %
+        ttk.Label(frame, text="Range modifications:", font=("", 9, "bold")).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(10, 3))
+
+        mod_header = ttk.Frame(frame)
+        mod_header.grid(row=3, column=0, columnspan=2, sticky="w")
+        ttk.Label(mod_header, text="From", width=6).pack(side=tk.LEFT, padx=2)
+        ttk.Label(mod_header, text="To", width=6).pack(side=tk.LEFT, padx=2)
+        ttk.Label(mod_header, text="Keep %", width=7).pack(side=tk.LEFT, padx=2)
+
+        mod_frame = ttk.Frame(frame)
+        mod_frame.grid(row=4, column=0, columnspan=2, sticky="ew")
+        mod_rows = []
+
+        def add_mod_row(lo="", hi="", keep="0"):
+            row = ttk.Frame(mod_frame)
+            row.pack(fill=tk.X, pady=1)
+            lo_var = tk.StringVar(value=lo)
+            hi_var = tk.StringVar(value=hi)
+            keep_var = tk.StringVar(value=keep)
+            ttk.Entry(row, textvariable=lo_var, width=6).pack(side=tk.LEFT, padx=2)
+            ttk.Entry(row, textvariable=hi_var, width=6).pack(side=tk.LEFT, padx=2)
+            ttk.Entry(row, textvariable=keep_var, width=7).pack(side=tk.LEFT, padx=2)
+
+            def remove():
+                row.destroy()
+                mod_rows.remove(entry)
+            ttk.Button(row, text="X", width=2, command=remove).pack(side=tk.LEFT, padx=2)
+            entry = (lo_var, hi_var, keep_var, row)
+            mod_rows.append(entry)
+
+        add_mod_row()
+
+        add_btn = ttk.Button(frame, text="+ Add Range", command=lambda: add_mod_row())
+        add_btn.grid(row=5, column=0, columnspan=2, sticky="w", pady=5)
 
         def apply_exploit():
             p = player_combo.current()
-            remove_text = remove_var.get().strip()
-            if not remove_text:
-                messagebox.showerror("Error", "Enter hand ranges to remove.")
+            modifications = []
+            for lo_var, hi_var, keep_var, _ in mod_rows:
+                try:
+                    lo = float(lo_var.get().strip())
+                    hi = float(hi_var.get().strip())
+                    keep = float(keep_var.get().strip()) / 100.0
+                except ValueError:
+                    messagebox.showerror("Error", "Invalid number in range modification.")
+                    return
+                if lo >= hi or lo < 0 or hi > 1:
+                    messagebox.showerror("Error", f"Invalid range [{lo}, {hi}]")
+                    return
+                if keep < 0 or keep > 1:
+                    messagebox.showerror("Error", f"Keep % must be 0-100, got {keep*100:.0f}")
+                    return
+                modifications.append((lo, hi, keep))
+
+            if not modifications:
+                messagebox.showerror("Error", "Add at least one range modification.")
                 return
 
-            try:
-                from config import RangeConfig
-                removed = RangeConfig.parse(remove_text)
-            except Exception as e:
-                messagebox.showerror("Error", f"Invalid range format: {e}")
-                return
-
-            self.solver.range_lock_exploit(p, removed.intervals)
+            self.solver.range_lock_exploit(p, modifications)
+            desc = ", ".join(f"{lo}-{hi} keep {k:.0%}" for lo, hi, k in modifications)
             dlg.destroy()
-            self.status_var.set(f"Range exploit: P{p+1} locked, removed {remove_text}. Run solver.")
+            self.status_var.set(f"Range exploit: P{p+1} locked, {desc}. Run solver.")
             self._populate_results()
 
         def undo_exploit():
@@ -1186,17 +1225,17 @@ class SolverGUI:
         self.ax.set_title("Run solver to see results")
         self.ax.grid(True, alpha=0.3)
 
+        self.ax_range.clear()
+        self.ax_range.set_xlim(0, 1)
+        self.ax_range.set_xlabel("Hand Value")
+        self.ax_range.set_ylabel("Range Density")
+        self.ax_range.grid(True, alpha=0.3)
+
         self.ax_freq.clear()
         self.ax_freq.set_xlim(0, 1)
         self.ax_freq.set_yticks([])
         self.ax_freq.set_xticks([])
         for spine in self.ax_freq.spines.values():
             spine.set_visible(False)
-
-        self.ax_range.clear()
-        self.ax_range.set_xlim(0, 1)
-        self.ax_range.set_xlabel("Hand Value")
-        self.ax_range.set_ylabel("Range Density")
-        self.ax_range.grid(True, alpha=0.3)
 
         self.canvas.draw()
