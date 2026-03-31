@@ -3,6 +3,47 @@ from typing import List, Tuple
 
 
 @dataclass
+class IntervalMapping:
+    """Maps hands in [src_lo, src_hi] linearly to [dst_lo, dst_hi]."""
+    src_lo: float
+    src_hi: float
+    dst_lo: float
+    dst_hi: float
+
+    def remap(self, value: float) -> float:
+        if self.src_lo <= value <= self.src_hi:
+            t = (value - self.src_lo) / (self.src_hi - self.src_lo) if self.src_hi > self.src_lo else 0.0
+            return self.dst_lo + t * (self.dst_hi - self.dst_lo)
+        return None
+
+
+@dataclass
+class BoardState:
+    """A single possible board outcome at a street transition."""
+    name: str
+    weight: float = 1.0
+    mappings: List[IntervalMapping] = field(default_factory=list)
+
+    def remap_value(self, value: float) -> float:
+        for m in self.mappings:
+            result = m.remap(value)
+            if result is not None:
+                return result
+        return value  # identity if not covered
+
+    @staticmethod
+    def identity(name: str = "Brick", weight: float = 1.0) -> "BoardState":
+        return BoardState(name=name, weight=weight,
+                          mappings=[IntervalMapping(0.0, 1.0, 0.0, 1.0)])
+
+
+@dataclass
+class TransitionConfig:
+    """Board states for a street transition (street N -> N+1)."""
+    board_states: List[BoardState] = field(default_factory=list)
+
+
+@dataclass
 class RangeConfig:
     """Range for a player as a list of [low, high] intervals on [0,1]."""
     intervals: List[Tuple[float, float]] = field(default_factory=lambda: [(0.0, 1.0)])
@@ -56,12 +97,15 @@ class GameConfig:
     starting_stack: float = 100.0
     street_configs: List[StreetConfig] = field(default_factory=list)
     range_configs: List[RangeConfig] = field(default_factory=list)
+    transition_configs: List[TransitionConfig] = field(default_factory=list)
 
     def __post_init__(self):
         while len(self.street_configs) < self.num_streets:
             self.street_configs.append(StreetConfig())
         while len(self.range_configs) < self.num_players:
             self.range_configs.append(RangeConfig())
+        while len(self.transition_configs) < self.num_streets - 1:
+            self.transition_configs.append(TransitionConfig())
 
     def validate(self) -> List[str]:
         """Return list of validation errors, empty if valid."""
@@ -83,4 +127,13 @@ class GameConfig:
         for i, sc in enumerate(self.street_configs):
             if not sc.bet_sizes:
                 errors.append(f"Street {i+1} needs at least one bet size")
+        for i, tc in enumerate(self.transition_configs):
+            for j, bs in enumerate(tc.board_states):
+                if bs.weight <= 0:
+                    errors.append(f"Transition {i+1} board '{bs.name}' must have positive weight")
+                for k, m in enumerate(bs.mappings):
+                    if m.src_lo >= m.src_hi:
+                        errors.append(f"Transition {i+1} board '{bs.name}' mapping {k+1}: src_lo >= src_hi")
+                    if m.dst_lo < 0 or m.dst_hi > 1:
+                        errors.append(f"Transition {i+1} board '{bs.name}' mapping {k+1}: dest outside [0,1]")
         return errors

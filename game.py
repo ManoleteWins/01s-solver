@@ -33,7 +33,7 @@ class GameState:
     __slots__ = [
         'config', 'street', 'pot', 'contributions', 'street_bets',
         'current_bet', 'active', 'all_in', 'to_act', 'history',
-        '_terminal', 'num_raises_this_street',
+        '_terminal', 'num_raises_this_street', 'board_path',
     ]
 
     def __init__(self, config: GameConfig):
@@ -49,6 +49,7 @@ class GameState:
         self.history: Tuple[str, ...] = ()
         self._terminal = False
         self.num_raises_this_street = 0
+        self.board_path: Tuple[int, ...] = ()
 
     def copy(self) -> GameState:
         s = GameState.__new__(GameState)
@@ -64,6 +65,7 @@ class GameState:
         s.history = self.history
         s._terminal = self._terminal
         s.num_raises_this_street = self.num_raises_this_street
+        s.board_path = self.board_path
         return s
 
     def is_terminal(self) -> bool:

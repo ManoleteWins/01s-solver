@@ -8,7 +8,7 @@ from typing import Optional
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-from config import GameConfig, StreetConfig, RangeConfig
+from config import GameConfig, StreetConfig, RangeConfig, TransitionConfig, BoardState, IntervalMapping
 from solver import CFRSolver
 
 
@@ -26,6 +26,7 @@ class SolverGUI:
         self.bet_entries = []
         self.raise_entries = []
         self.max_raises_entries = []
+        self.board_transition_entries = []  # per transition: list of board state dicts
 
         self._build_ui()
 
@@ -146,6 +147,27 @@ class SolverGUI:
 
         self._rebuild_dynamic()
 
+    # Board state presets
+    BOARD_PRESETS = {
+        'Brick': [IntervalMapping(0.0, 1.0, 0.0, 1.0)],
+        'Draw completes': [
+            IntervalMapping(0.0, 0.2, 0.0, 0.2),
+            IntervalMapping(0.2, 0.4, 0.8, 1.0),
+            IntervalMapping(0.4, 1.0, 0.2, 0.8),
+        ],
+        'Reverse': [IntervalMapping(0.0, 1.0, 1.0, 0.0)],
+        'Polarize': [
+            IntervalMapping(0.0, 0.3, 0.0, 0.45),
+            IntervalMapping(0.3, 0.7, 0.45, 0.55),
+            IntervalMapping(0.7, 1.0, 0.55, 1.0),
+        ],
+        'Top collapses': [
+            IntervalMapping(0.0, 0.6, 0.0, 0.6),
+            IntervalMapping(0.6, 0.8, 0.6, 0.65),
+            IntervalMapping(0.8, 1.0, 0.65, 1.0),
+        ],
+    }
+
     def _rebuild_dynamic(self):
         """Rebuild player range and street config entries."""
         for widget in self.dynamic_frame.winfo_children():
@@ -155,6 +177,7 @@ class SolverGUI:
         self.bet_entries.clear()
         self.raise_entries.clear()
         self.max_raises_entries.clear()
+        self.board_transition_entries.clear()
 
         f = self.dynamic_frame
         row = 0
@@ -207,14 +230,78 @@ class SolverGUI:
             self.max_raises_entries.append(mrvar)
             row += 1
 
+        # ── Board Transitions ──
+        if n_streets > 1:
+            ttk.Label(f, text="Board Transitions", font=("", 11, "bold")).grid(
+                row=row, column=0, columnspan=2, sticky="w", pady=(10, 2)
+            )
+            row += 1
+
+            for t in range(n_streets - 1):
+                transition_boards = []
+                self.board_transition_entries.append(transition_boards)
+
+                trans_frame = ttk.LabelFrame(f, text=f"Street {t+1} → {t+2}")
+                trans_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=2, padx=2)
+                row += 1
+
+                boards_container = ttk.Frame(trans_frame)
+                boards_container.pack(fill=tk.X, padx=2, pady=2)
+
+                def add_board(container=boards_container, boards=transition_boards,
+                              name="Brick", weight="1.0", mappings_str="0-1 → 0-1"):
+                    board_frame = ttk.Frame(container)
+                    board_frame.pack(fill=tk.X, pady=1)
+
+                    name_var = tk.StringVar(value=name)
+                    weight_var = tk.StringVar(value=weight)
+                    mappings_var = tk.StringVar(value=mappings_str)
+
+                    ttk.Label(board_frame, text="Name:").pack(side=tk.LEFT, padx=1)
+                    ttk.Entry(board_frame, textvariable=name_var, width=12).pack(side=tk.LEFT, padx=1)
+                    ttk.Label(board_frame, text="Wt:").pack(side=tk.LEFT, padx=1)
+                    ttk.Entry(board_frame, textvariable=weight_var, width=4).pack(side=tk.LEFT, padx=1)
+                    ttk.Label(board_frame, text="Map:").pack(side=tk.LEFT, padx=1)
+                    ttk.Entry(board_frame, textvariable=mappings_var, width=20).pack(side=tk.LEFT, padx=1)
+
+                    entry = {'name': name_var, 'weight': weight_var, 'mappings': mappings_var,
+                             'frame': board_frame}
+                    boards.append(entry)
+
+                    def remove(e=entry, b=boards):
+                        e['frame'].destroy()
+                        b.remove(e)
+                    ttk.Button(board_frame, text="X", width=2, command=remove).pack(side=tk.LEFT, padx=1)
+
+                btn_frame = ttk.Frame(trans_frame)
+                btn_frame.pack(fill=tk.X, padx=2, pady=2)
+
+                ttk.Button(btn_frame, text="+ Board",
+                           command=lambda c=boards_container, b=transition_boards: add_board(c, b)
+                           ).pack(side=tk.LEFT, padx=2)
+
+                # Preset buttons
+                for preset_name, preset_mappings in self.BOARD_PRESETS.items():
+                    mappings_str = "; ".join(
+                        f"{m.src_lo}-{m.src_hi} → {m.dst_lo}-{m.dst_hi}" for m in preset_mappings
+                    )
+                    ttk.Button(
+                        btn_frame, text=preset_name,
+                        command=lambda c=boards_container, b=transition_boards,
+                                       n=preset_name, ms=mappings_str: add_board(c, b, n, "1.0", ms)
+                    ).pack(side=tk.LEFT, padx=1)
+
     def _build_results_panel(self, parent: ttk.Frame):
         # Breadcrumb path pills
         self.breadcrumb_frame = ttk.Frame(parent)
         self.breadcrumb_frame.pack(fill=tk.X, padx=5, pady=(5, 2))
 
-        # Action choice pills + lock controls
+        # Action choice pills + board selector + lock controls
         self.action_pill_frame = ttk.Frame(parent)
         self.action_pill_frame.pack(fill=tk.X, padx=5, pady=(2, 2))
+
+        self.board_pill_frame = ttk.Frame(parent)
+        self.board_pill_frame.pack(fill=tk.X, padx=5, pady=(0, 2))
 
         self.lock_frame = ttk.Frame(parent)
         self.lock_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
@@ -262,6 +349,31 @@ class SolverGUI:
                 max_r = self.max_raises_entries[i].get()
                 streets.append(StreetConfig(bet_sizes=bets, raise_sizes=raises, max_raises=max_r))
 
+            transitions = []
+            for boards in self.board_transition_entries:
+                board_states = []
+                for entry in boards:
+                    name = entry['name'].get().strip()
+                    weight = float(entry['weight'].get().strip())
+                    mappings_text = entry['mappings'].get().strip()
+                    mappings = []
+                    for part in mappings_text.split(';'):
+                        part = part.strip()
+                        if not part:
+                            continue
+                        # Parse "0-1 → 0-1" or "0-1 > 0-1"
+                        for sep in ['→', '->', '>']:
+                            if sep in part:
+                                src, dst = part.split(sep, 1)
+                                break
+                        else:
+                            raise ValueError(f"Bad mapping format: {part}")
+                        src_lo, src_hi = [float(x.strip()) for x in src.strip().split('-', 1)]
+                        dst_lo, dst_hi = [float(x.strip()) for x in dst.strip().split('-', 1)]
+                        mappings.append(IntervalMapping(src_lo, src_hi, dst_lo, dst_hi))
+                    board_states.append(BoardState(name=name, weight=weight, mappings=mappings))
+                transitions.append(TransitionConfig(board_states=board_states))
+
             cfg = GameConfig(
                 num_players=n_players,
                 num_streets=n_streets,
@@ -270,6 +382,7 @@ class SolverGUI:
                 starting_stack=self.stack_var.get(),
                 street_configs=streets,
                 range_configs=ranges,
+                transition_configs=transitions,
             )
 
             errors = cfg.validate()
@@ -303,6 +416,19 @@ class SolverGUI:
         for a, b in zip(old.range_configs, cfg.range_configs):
             if a.intervals != b.intervals:
                 return False
+        if len(old.transition_configs) != len(cfg.transition_configs):
+            return False
+        for a, b in zip(old.transition_configs, cfg.transition_configs):
+            if len(a.board_states) != len(b.board_states):
+                return False
+            for ba, bb in zip(a.board_states, b.board_states):
+                if (ba.name != bb.name or ba.weight != bb.weight or
+                        len(ba.mappings) != len(bb.mappings)):
+                    return False
+                for ma, mb in zip(ba.mappings, bb.mappings):
+                    if (ma.src_lo != mb.src_lo or ma.src_hi != mb.src_hi or
+                            ma.dst_lo != mb.dst_lo or ma.dst_hi != mb.dst_hi):
+                        return False
         return True
 
     # ─── Solver Control ──────────────────────────────────────────
@@ -366,6 +492,8 @@ class SolverGUI:
             w.destroy()
         for w in self.action_pill_frame.winfo_children():
             w.destroy()
+        for w in self.board_pill_frame.winfo_children():
+            w.destroy()
         for w in self.lock_frame.winfo_children():
             w.destroy()
         self._clear_plot()
@@ -400,17 +528,66 @@ class SolverGUI:
         for (player, history), actions in self.solver.info_sets.items():
             self._node_map[history] = (player, actions)
 
-        # Build child map: {(history, action_key): child_history}
+        # Build child map: {(history, action_key): child_history or list}
+        # If an action leads to board states, value is list of (board_name, child_history)
         self._child_map = {}
         all_histories = sorted(self._node_map.keys(), key=len)
         for hist in all_histories:
             _, actions = self._node_map[hist]
             for action in actions:
                 prefix = hist + (action.key(),)
+                # Find the direct child (shortest matching history)
+                direct_child = None
                 for child_hist in all_histories:
                     if len(child_hist) > len(hist) and child_hist[:len(prefix)] == prefix:
-                        self._child_map[(hist, action.key())] = child_hist
+                        direct_child = child_hist
                         break
+                if direct_child is None:
+                    continue
+                # Check if the direct child goes through a board transition
+                segment = direct_child[len(prefix):]
+                board_tokens = [s for s in segment if isinstance(s, str) and s.startswith('board:')]
+                if board_tokens:
+                    # This action leads to a chance node — find all board siblings
+                    # The segment has '|' then 'board:k', find all children with different board:k
+                    # Strip the board token to get the common prefix before it
+                    board_prefix = direct_child[:len(direct_child)]
+                    # Find the position of the board token in the history
+                    board_pos = None
+                    for idx, s in enumerate(direct_child):
+                        if isinstance(s, str) and s.startswith('board:') and idx >= len(prefix):
+                            board_pos = idx
+                            break
+                    if board_pos is not None:
+                        common = direct_child[:board_pos]
+                        board_children = []
+                        seen_boards = set()
+                        for child_hist in all_histories:
+                            if (len(child_hist) > board_pos and
+                                    child_hist[:board_pos] == common and
+                                    isinstance(child_hist[board_pos], str) and
+                                    child_hist[board_pos].startswith('board:')):
+                                bk = child_hist[board_pos]
+                                if bk not in seen_boards:
+                                    seen_boards.add(bk)
+                                    board_idx = int(bk.split(':')[1])
+                                    # Count '|' in the child history up to board_pos to find transition index
+                                    street = sum(1 for s in child_hist[:board_pos] if s == '|')
+                                    tc_idx = street - 1
+                                    if (tc_idx >= 0 and
+                                            tc_idx < len(self.solver.config.transition_configs)):
+                                        tc = self.solver.config.transition_configs[tc_idx]
+                                        if board_idx < len(tc.board_states):
+                                            name = tc.board_states[board_idx].name
+                                        else:
+                                            name = f"Board {board_idx}"
+                                    else:
+                                        name = f"Board {board_idx}"
+                                    board_children.append((name, child_hist))
+                        if board_children:
+                            self._child_map[(hist, action.key())] = board_children
+                            continue
+                self._child_map[(hist, action.key())] = direct_child
 
         # Start at root (shortest history)
         self._current_history = all_histories[0] if all_histories else ()
@@ -437,6 +614,8 @@ class SolverGUI:
         # Breadcrumbs
         for w in self.breadcrumb_frame.winfo_children():
             w.destroy()
+        for w in self.board_pill_frame.winfo_children():
+            w.destroy()
 
         # Find all ancestor nodes along the current path
         ancestors = []
@@ -455,9 +634,27 @@ class SolverGUI:
             else:
                 prev = ancestors[i - 1]
                 segment = hist[len(prev):]
-                parts = [s for s in segment if s != '|']
+                # Replace board tokens with board names
+                display_parts = []
+                for s in segment:
+                    if s == '|':
+                        continue
+                    if isinstance(s, str) and s.startswith('board:'):
+                        board_idx = int(s.split(':')[1])
+                        street = sum(1 for x in hist if x == '|')
+                        tc_idx = street - 1
+                        if (tc_idx >= 0 and tc_idx < len(self.solver.config.transition_configs)):
+                            tc = self.solver.config.transition_configs[tc_idx]
+                            if board_idx < len(tc.board_states):
+                                display_parts.append(f"[{tc.board_states[board_idx].name}]")
+                            else:
+                                display_parts.append(s)
+                        else:
+                            display_parts.append(s)
+                    else:
+                        display_parts.append(s)
                 has_street = '|' in segment
-                action_text = " ".join(parts) if parts else ""
+                action_text = " ".join(display_parts) if display_parts else ""
                 prefix = f"P{player + 1}"
                 if has_street:
                     street_num = sum(1 for s in hist if s == '|') + 1
@@ -1068,9 +1265,27 @@ class SolverGUI:
     def _navigate_action(self, action):
         key = (self._current_history, action.key())
         if key in self._child_map:
-            self._current_history = self._child_map[key]
-            self._render_navigation()
-            self._render_current_strategy()
+            child = self._child_map[key]
+            if isinstance(child, list):
+                # Board states — show board selector
+                self._show_board_selector(child)
+            else:
+                self._current_history = child
+                self._render_navigation()
+                self._render_current_strategy()
+
+    def _show_board_selector(self, board_children):
+        """Show board state pills for choosing which board to navigate to."""
+        for w in self.board_pill_frame.winfo_children():
+            w.destroy()
+        ttk.Label(self.board_pill_frame, text="Board dealt:",
+                  font=("", 9)).pack(side=tk.LEFT, padx=(0, 5))
+        for name, child_hist in board_children:
+            self._make_pill(
+                self.board_pill_frame, name,
+                command=lambda h=child_hist: self._navigate_to(h),
+                color='#e67e22',  # orange for board states
+            )
 
     def _render_current_strategy(self):
         if self._current_history not in self._node_map:
@@ -1139,7 +1354,7 @@ class SolverGUI:
         ev_raw, ev_pot = self.solver.compute_ev(history)
         if ev_raw is not None and ev_pot > 0:
             ev_pct = np.clip(ev_raw / ev_pot, None, 1.0)
-            self.ax.plot(x, ev_pct, color='white', linewidth=2, linestyle=':',
+            self.ax.plot(x, ev_pct, color='blue', linewidth=2, linestyle=':',
                          label='EV (% pot)', zorder=10)
 
         self.ax.set_xlim(0, 1)

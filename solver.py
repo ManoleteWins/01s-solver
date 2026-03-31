@@ -6,6 +6,30 @@ from config import GameConfig
 from game import GameState, Action
 
 
+def _recompute_boards_worker(config, hand_values, D):
+    """Recompute board precomputation in a worker process."""
+    from itertools import product as iterproduct
+    precomputed = {}
+    # Enumerate all board paths
+    transition_counts = []
+    for tc in config.transition_configs:
+        if tc.board_states:
+            transition_counts.append(len(tc.board_states))
+    if not transition_counts:
+        return precomputed
+    for path in iterproduct(*(range(n) for n in transition_counts)):
+        effective = hand_values.copy()
+        for step, board_idx in enumerate(path):
+            tc = config.transition_configs[step]
+            bs = tc.board_states[board_idx]
+            effective = np.array([bs.remap_value(v) for v in effective])
+        sort_order = np.argsort(effective, kind='stable')
+        inv_order = np.empty_like(sort_order)
+        inv_order[sort_order] = np.arange(D)
+        precomputed[path] = (sort_order, inv_order)
+    return precomputed
+
+
 def _shared_worker(config, initial_reach, node_locks, strategy_locks,
                    index_map, n_actions_map, D, max_actions,
                    regret_shm_name, strategy_shm_name, arr_shape,
@@ -28,6 +52,9 @@ def _shared_worker(config, initial_reach, node_locks, strategy_locks,
             strategy_locks[key] = locked_arr[idx, :, :na]
 
     N = config.num_players
+    hand_values = np.linspace(0.5 / D, 1.0 - 0.5 / D, D)
+    board_precomputed = _recompute_boards_worker(config, hand_values, D)
+    transition_configs = config.transition_configs
 
     for _ in range(iterations):
         for p in range(N):
@@ -35,7 +62,7 @@ def _shared_worker(config, initial_reach, node_locks, strategy_locks,
             reach = [r.copy() for r in initial_reach]
             _cfr_shared(root, reach, p, D, N, regret_arr, strategy_arr,
                         index_map, n_actions_map, node_locks, strategy_locks,
-                        initial_reach)
+                        initial_reach, transition_configs, board_precomputed)
         with progress_counter.get_lock():
             progress_counter.value += 1
 
@@ -45,12 +72,42 @@ def _shared_worker(config, initial_reach, node_locks, strategy_locks,
         locked_shm.close()
 
 
+def _cfr_shared_recurse(state, new_state, reach, traverser, D, N,
+                        regret_arr, strategy_arr, index_map, n_actions_map,
+                        node_locks, strategy_locks, initial_reach,
+                        transition_configs, board_precomputed):
+    """Recurse into new_state, inserting chance nodes at street transitions."""
+    if new_state.street > state.street:
+        street = state.street
+        if street < len(transition_configs):
+            tc = transition_configs[street]
+            if tc.board_states:
+                total_weight = sum(bs.weight for bs in tc.board_states)
+                value = np.zeros(D)
+                for k, bs in enumerate(tc.board_states):
+                    prob = bs.weight / total_weight
+                    board_state = new_state.copy()
+                    board_state.history = new_state.history + (f'board:{k}',)
+                    board_state.board_path = state.board_path + (k,)
+                    value += prob * _cfr_shared(
+                        board_state, reach, traverser, D, N,
+                        regret_arr, strategy_arr, index_map, n_actions_map,
+                        node_locks, strategy_locks, initial_reach,
+                        transition_configs, board_precomputed)
+                return value
+    return _cfr_shared(
+        new_state, reach, traverser, D, N,
+        regret_arr, strategy_arr, index_map, n_actions_map,
+        node_locks, strategy_locks, initial_reach,
+        transition_configs, board_precomputed)
+
+
 def _cfr_shared(state, reach, traverser, D, N, regret_arr, strategy_arr,
                 index_map, n_actions_map, node_locks, strategy_locks,
-                initial_reach):
+                initial_reach, transition_configs=None, board_precomputed=None):
     """CFR traversal using shared memory arrays."""
     if state.is_terminal():
-        return _terminal_shared(state, reach, traverser, D, N)
+        return _terminal_shared(state, reach, traverser, D, N, board_precomputed)
 
     player = state.current_player()
     key = (player, state.history)
@@ -80,10 +137,11 @@ def _cfr_shared(state, reach, traverser, D, N, regret_arr, strategy_arr,
             new_state = state.apply(actions[a_idx])
             new_reach = [r.copy() for r in reach]
             new_reach[traverser] = new_reach[traverser] * strategy[:, a_idx]
-            action_values[a_idx] = _cfr_shared(
-                new_state, new_reach, traverser, D, N,
+            action_values[a_idx] = _cfr_shared_recurse(
+                state, new_state, new_reach, traverser, D, N,
                 regret_arr, strategy_arr, index_map, n_actions_map,
-                node_locks, strategy_locks, initial_reach)
+                node_locks, strategy_locks, initial_reach,
+                transition_configs, board_precomputed)
 
         node_value = np.einsum('ad,da->d', action_values, strategy)
 
@@ -101,14 +159,15 @@ def _cfr_shared(state, reach, traverser, D, N, regret_arr, strategy_arr,
             new_state = state.apply(actions[a_idx])
             new_reach = [r.copy() for r in reach]
             new_reach[player] = new_reach[player] * strategy[:, a_idx]
-            total_value += _cfr_shared(
-                new_state, new_reach, traverser, D, N,
+            total_value += _cfr_shared_recurse(
+                state, new_state, new_reach, traverser, D, N,
                 regret_arr, strategy_arr, index_map, n_actions_map,
-                node_locks, strategy_locks, initial_reach)
+                node_locks, strategy_locks, initial_reach,
+                transition_configs, board_precomputed)
         return total_value
 
 
-def _terminal_shared(state, reach, traverser, D, N):
+def _terminal_shared(state, reach, traverser, D, N, board_precomputed=None):
     """Terminal value using CDF trick."""
     active = state.active_players()
     t = traverser
@@ -132,11 +191,20 @@ def _terminal_shared(state, reach, traverser, D, N):
             F *= np.sum(reach[j])
 
     win_weight = np.ones(D)
-    for opp in active_opponents:
-        cdf = np.cumsum(reach[opp])
-        cdf_shifted = np.zeros(D)
-        cdf_shifted[1:] = cdf[:-1]
-        win_weight *= cdf_shifted
+    if board_precomputed and state.board_path and state.board_path in board_precomputed:
+        sort_order, inv_order = board_precomputed[state.board_path]
+        for opp in active_opponents:
+            opp_sorted = reach[opp][sort_order]
+            cdf = np.cumsum(opp_sorted)
+            cdf_shifted = np.zeros(D)
+            cdf_shifted[1:] = cdf[:-1]
+            win_weight *= cdf_shifted[inv_order]
+    else:
+        for opp in active_opponents:
+            cdf = np.cumsum(reach[opp])
+            cdf_shifted = np.zeros(D)
+            cdf_shifted[1:] = cdf[:-1]
+            win_weight *= cdf_shifted
 
     return state.pot * F * win_weight - state.contributions[t] * R
 
@@ -194,12 +262,49 @@ class CFRSolver:
         self.regret_data: Optional[np.ndarray] = None   # (n_info_sets, D, max_actions)
         self.strategy_data: Optional[np.ndarray] = None
 
+        # Board state precomputation: {board_path: (sort_order, inv_order)}
+        self._board_precomputed: Dict[Tuple, Tuple[np.ndarray, np.ndarray]] = {}
+        self._has_boards = any(
+            tc.board_states for tc in config.transition_configs
+        )
+
+    # ── Board precomputation ───────────────────────────────────
+
+    def _precompute_boards(self):
+        """Precompute sort orders for all board paths found during discovery."""
+        if not self._has_boards:
+            return
+        for board_path in self._board_paths:
+            if board_path in self._board_precomputed:
+                continue
+            effective = self.hand_values.copy()
+            for step, board_idx in enumerate(board_path):
+                tc = self.config.transition_configs[step]
+                bs = tc.board_states[board_idx]
+                effective = np.array([bs.remap_value(v) for v in effective])
+            sort_order = np.argsort(effective, kind='stable')
+            inv_order = np.empty_like(sort_order)
+            inv_order[sort_order] = np.arange(self.D)
+            self._board_precomputed[board_path] = (sort_order, inv_order)
+
+    def _get_transition(self, street: int):
+        """Get the transition config for moving from `street` to `street+1`."""
+        if street < len(self.config.transition_configs):
+            tc = self.config.transition_configs[street]
+            if tc.board_states:
+                return tc
+        return None
+
     # ── Tree discovery ──────────────────────────────────────────
 
     def _discover_tree(self):
         """Traverse game tree once to find all info sets."""
         self.info_sets = {}
+        self._board_paths = set()
+        self._board_paths.add(())
         self._discover(GameState(self.config))
+
+        self._precompute_boards()
 
         sorted_keys = sorted(self.info_sets.keys())
         self._index_map = {k: i for i, k in enumerate(sorted_keys)}
@@ -220,7 +325,20 @@ class CFRSolver:
         if key not in self.info_sets:
             self.info_sets[key] = actions
             for action in actions:
-                self._discover(state.apply(action))
+                new_state = state.apply(action)
+                if new_state.street > state.street:
+                    transition = self._get_transition(state.street)
+                    if transition:
+                        for k in range(len(transition.board_states)):
+                            bs = new_state.copy()
+                            bs.history = new_state.history + (f'board:{k}',)
+                            bs.board_path = state.board_path + (k,)
+                            self._board_paths.add(bs.board_path)
+                            self._discover(bs)
+                    else:
+                        self._discover(new_state)
+                else:
+                    self._discover(new_state)
 
     def _ensure_discovered(self):
         if self._index_map is None:
@@ -369,6 +487,23 @@ class CFRSolver:
 
     # ── CFR traversal (single-thread, uses self arrays) ─────────
 
+    def _cfr_recurse(self, state: GameState, new_state: GameState,
+                     reach: List[np.ndarray], traverser: int) -> np.ndarray:
+        """Recurse into new_state, inserting chance nodes at street transitions."""
+        if new_state.street > state.street:
+            transition = self._get_transition(state.street)
+            if transition:
+                total_weight = sum(bs.weight for bs in transition.board_states)
+                value = np.zeros(self.D)
+                for k, bs in enumerate(transition.board_states):
+                    prob = bs.weight / total_weight
+                    board_state = new_state.copy()
+                    board_state.history = new_state.history + (f'board:{k}',)
+                    board_state.board_path = state.board_path + (k,)
+                    value += prob * self._cfr(board_state, reach, traverser)
+                return value
+        return self._cfr(new_state, reach, traverser)
+
     def _cfr(self, state: GameState, reach: List[np.ndarray], traverser: int) -> np.ndarray:
         if state.is_terminal():
             return self._terminal_value(state, reach, traverser)
@@ -389,7 +524,7 @@ class CFRSolver:
                 new_state = state.apply(action)
                 new_reach = [r.copy() for r in reach]
                 new_reach[traverser] = new_reach[traverser] * strategy[:, a_idx]
-                action_values[a_idx] = self._cfr(new_state, new_reach, traverser)
+                action_values[a_idx] = self._cfr_recurse(state, new_state, new_reach, traverser)
 
             node_value = np.einsum('ad,da->d', action_values, strategy)
 
@@ -406,7 +541,7 @@ class CFRSolver:
                 new_state = state.apply(action)
                 new_reach = [r.copy() for r in reach]
                 new_reach[player] = new_reach[player] * strategy[:, a_idx]
-                total_value += self._cfr(new_state, new_reach, traverser)
+                total_value += self._cfr_recurse(state, new_state, new_reach, traverser)
             return total_value
 
     def _terminal_value(self, state, reach, traverser):
@@ -427,11 +562,21 @@ class CFRSolver:
             if j != t and j not in active:
                 F *= np.sum(reach[j])
         win_weight = np.ones(D)
-        for opp in active_opponents:
-            cdf = np.cumsum(reach[opp])
-            cdf_shifted = np.zeros(D)
-            cdf_shifted[1:] = cdf[:-1]
-            win_weight *= cdf_shifted
+        if state.board_path and state.board_path in self._board_precomputed:
+            sort_order, inv_order = self._board_precomputed[state.board_path]
+            for opp in active_opponents:
+                opp_sorted = reach[opp][sort_order]
+                cdf = np.cumsum(opp_sorted)
+                cdf_shifted = np.zeros(D)
+                cdf_shifted[1:] = cdf[:-1]
+                # Map back to original hand indices
+                win_weight *= cdf_shifted[inv_order]
+        else:
+            for opp in active_opponents:
+                cdf = np.cumsum(reach[opp])
+                cdf_shifted = np.zeros(D)
+                cdf_shifted[1:] = cdf[:-1]
+                win_weight *= cdf_shifted
         return state.pot * F * win_weight - state.contributions[t] * R
 
     # ── Projection / locking ────────────────────────────────────
@@ -554,6 +699,33 @@ class CFRSolver:
 
     # ── Analysis ────────────────────────────────────────────────
 
+    def _replay_state(self, history):
+        """Replay actions to reconstruct GameState at a given history."""
+        state = GameState(self.config)
+        idx = 0
+        while idx < len(history):
+            if state.is_terminal():
+                break
+            action_key = history[idx]
+            if action_key == '|':
+                idx += 1
+                continue
+            if action_key.startswith('board:'):
+                board_idx = int(action_key.split(':')[1])
+                state.board_path = state.board_path + (board_idx,)
+                state.history = state.history + (action_key,)
+                idx += 1
+                continue
+            actions = state.available_actions()
+            for action in actions:
+                if action.key() == action_key:
+                    state = state.apply(action)
+                    break
+            idx += 1
+            while idx < len(history) and history[idx] == '|':
+                idx += 1
+        return state
+
     def compute_reach_at_node(self, target_history):
         reach = [r.copy() for r in self.initial_reach]
         state = GameState(self.config)
@@ -563,6 +735,12 @@ class CFRSolver:
                 break
             action_key = target_history[idx]
             if action_key == '|':
+                idx += 1
+                continue
+            if action_key.startswith('board:'):
+                board_idx = int(action_key.split(':')[1])
+                state.board_path = state.board_path + (board_idx,)
+                state.history = state.history + (action_key,)
                 idx += 1
                 continue
             player = state.current_player()
@@ -582,6 +760,14 @@ class CFRSolver:
                 idx += 1
         return reach
 
+    def _get_board_path_from_history(self, history):
+        """Extract the board path tuple from a history."""
+        path = []
+        for h in history:
+            if isinstance(h, str) and h.startswith('board:'):
+                path.append(int(h.split(':')[1]))
+        return tuple(path)
+
     def compute_equity(self, history):
         if history not in {h for (_, h) in self.info_sets}:
             return None
@@ -593,34 +779,30 @@ class CFRSolver:
         if player is None:
             return None
         reach = self.compute_reach_at_node(history)
-        state = GameState(self.config)
-        idx = 0
-        while idx < len(history):
-            if state.is_terminal():
-                break
-            action_key = history[idx]
-            if action_key == '|':
-                idx += 1
-                continue
-            actions = state.available_actions()
-            for action in actions:
-                if action.key() == action_key:
-                    state = state.apply(action)
-                    break
-            idx += 1
-            while idx < len(history) and history[idx] == '|':
-                idx += 1
+        state = self._replay_state(history)
         active_opponents = [p for p in state.active_players() if p != player]
         if not active_opponents:
             return np.ones(self.D)
         equity = np.ones(self.D)
-        for opp in active_opponents:
-            opp_total = reach[opp].sum()
-            if opp_total > 1e-15:
-                cdf = np.cumsum(reach[opp] / opp_total)
-                cdf_shifted = np.zeros(self.D)
-                cdf_shifted[1:] = cdf[:-1]
-                equity *= cdf_shifted
+        board_path = self._get_board_path_from_history(history)
+        if board_path and board_path in self._board_precomputed:
+            sort_order, inv_order = self._board_precomputed[board_path]
+            for opp in active_opponents:
+                opp_total = reach[opp].sum()
+                if opp_total > 1e-15:
+                    opp_sorted = reach[opp][sort_order] / opp_total
+                    cdf = np.cumsum(opp_sorted)
+                    cdf_shifted = np.zeros(self.D)
+                    cdf_shifted[1:] = cdf[:-1]
+                    equity *= cdf_shifted[inv_order]
+        else:
+            for opp in active_opponents:
+                opp_total = reach[opp].sum()
+                if opp_total > 1e-15:
+                    cdf = np.cumsum(reach[opp] / opp_total)
+                    cdf_shifted = np.zeros(self.D)
+                    cdf_shifted[1:] = cdf[:-1]
+                    equity *= cdf_shifted
         return equity
 
     def compute_ev(self, history):
@@ -641,26 +823,7 @@ class CFRSolver:
             return None, None
 
         reach = self.compute_reach_at_node(history)
-
-        # Replay game state to this node
-        state = GameState(self.config)
-        idx = 0
-        while idx < len(history):
-            if state.is_terminal():
-                break
-            action_key = history[idx]
-            if action_key == '|':
-                idx += 1
-                continue
-            actions = state.available_actions()
-            for action in actions:
-                if action.key() == action_key:
-                    state = state.apply(action)
-                    break
-            idx += 1
-            while idx < len(history) and history[idx] == '|':
-                idx += 1
-
+        state = self._replay_state(history)
         pot = state.pot
 
         # Tree walk for counterfactual values
@@ -679,6 +842,22 @@ class CFRSolver:
 
         return ev, pot
 
+    def _ev_walk_recurse(self, state, new_state, reach, traverser):
+        """Recurse into new_state for EV walk, handling chance nodes."""
+        if new_state.street > state.street:
+            transition = self._get_transition(state.street)
+            if transition:
+                total_weight = sum(bs.weight for bs in transition.board_states)
+                value = np.zeros(self.D)
+                for k, bs in enumerate(transition.board_states):
+                    prob = bs.weight / total_weight
+                    board_state = new_state.copy()
+                    board_state.history = new_state.history + (f'board:{k}',)
+                    board_state.board_path = state.board_path + (k,)
+                    value += prob * self._ev_walk(board_state, reach, traverser)
+                return value
+        return self._ev_walk(new_state, reach, traverser)
+
     def _ev_walk(self, state, reach, traverser):
         """Recursive tree walk computing counterfactual values using average strategies."""
         if state.is_terminal():
@@ -695,7 +874,7 @@ class CFRSolver:
                 new_state = state.apply(action)
                 new_reach = [r.copy() for r in reach]
                 new_reach[traverser] = new_reach[traverser] * strategy[:, a_idx]
-                action_values[a_idx] = self._ev_walk(new_state, new_reach, traverser)
+                action_values[a_idx] = self._ev_walk_recurse(state, new_state, new_reach, traverser)
             return np.einsum('ad,da->d', action_values, strategy)
         else:
             total_value = np.zeros(self.D)
@@ -703,7 +882,7 @@ class CFRSolver:
                 new_state = state.apply(action)
                 new_reach = [r.copy() for r in reach]
                 new_reach[player] = new_reach[player] * strategy[:, a_idx]
-                total_value += self._ev_walk(new_state, new_reach, traverser)
+                total_value += self._ev_walk_recurse(state, new_state, new_reach, traverser)
             return total_value
 
     def format_history(self, history):
@@ -715,6 +894,16 @@ class CFRSolver:
             if h == '|':
                 street += 1
                 parts.append(f"| Street {street + 1}:")
+            elif h.startswith('board:'):
+                board_idx = int(h.split(':')[1])
+                if street - 1 < len(self.config.transition_configs):
+                    tc = self.config.transition_configs[street - 1]
+                    if board_idx < len(tc.board_states):
+                        parts.append(f"[{tc.board_states[board_idx].name}]")
+                    else:
+                        parts.append(h)
+                else:
+                    parts.append(h)
             else:
                 parts.append(h)
         return " > ".join(parts) if parts else "(root)"
