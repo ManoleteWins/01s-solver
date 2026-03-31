@@ -101,9 +101,9 @@ class SolverGUI:
         ttk.Entry(f, textvariable=self.stack_var, width=8).grid(row=row, column=1, sticky="w")
         row += 1
 
-        ttk.Label(f, text="Iterations:").grid(row=row, column=0, sticky="w")
-        self.iter_var = tk.IntVar(value=10000)
-        ttk.Entry(f, textvariable=self.iter_var, width=8).grid(row=row, column=1, sticky="w")
+        ttk.Label(f, text="Regret % pot:").grid(row=row, column=0, sticky="w")
+        self.regret_target_var = tk.DoubleVar(value=0.5)
+        ttk.Entry(f, textvariable=self.regret_target_var, width=8).grid(row=row, column=1, sticky="w")
         row += 1
 
         ttk.Label(f, text="Threads:").grid(row=row, column=0, sticky="w")
@@ -322,16 +322,24 @@ class SolverGUI:
         self.status_var.set("Running...")
         self.progress_var.set(0)
 
-        total = self.iter_var.get()
+        target_regret = self.regret_target_var.get()
         num_threads = self.threads_var.get()
+        batch_size = 5000
 
         def worker():
             try:
-                if num_threads > 1:
-                    self.solver.train_parallel(total, num_threads,
-                                               callback=self._progress_callback)
-                else:
-                    self.solver.train(total, callback=self._progress_callback)
+                while self._running:
+                    if num_threads > 1:
+                        self.solver.train_parallel(batch_size, num_threads,
+                                                    callback=self._progress_callback)
+                    else:
+                        self.solver.train(batch_size, callback=self._progress_callback)
+                    avg_regret = self.solver.average_regret_pct()
+                    iters = self.solver.iterations_done
+                    self.root.after(0, lambda r=avg_regret, i=iters: self.status_var.set(
+                        f"Running... {i} iters, avg regret: {r:.2f}% pot"))
+                    if avg_regret <= target_regret:
+                        break
             except StopIteration:
                 pass
             except Exception as e:
@@ -377,7 +385,8 @@ class SolverGUI:
         if self.solver is None:
             return
         locks_str = f", {len(self.solver.node_locks)} locks" if self.solver.node_locks else ""
-        self.status_var.set(f"Done — {self.solver.iterations_done} iterations{locks_str}")
+        avg_regret = self.solver.average_regret_pct()
+        self.status_var.set(f"Done — {self.solver.iterations_done} iters, regret: {avg_regret:.2f}% pot{locks_str}")
         self._populate_results()
 
     # ─── Results Display ─────────────────────────────────────────
@@ -993,8 +1002,36 @@ class SolverGUI:
             self.solver.range_lock_exploit(p, modifications)
             desc = ", ".join(f"{lo}-{hi} keep {k:.0%}" for lo, hi, k in modifications)
             dlg.destroy()
-            self.status_var.set(f"Range exploit: P{p+1} locked, {desc}. Run solver.")
-            self._populate_results()
+            self._running = True
+            self.run_btn.config(state=tk.DISABLED)
+            self.stop_btn.config(state=tk.NORMAL)
+
+            num_threads = self.threads_var.get()
+            target_regret = self.regret_target_var.get()
+            batch = 5000
+
+            def exploit_worker():
+                try:
+                    for _ in range(20):
+                        if not self._running:
+                            break
+                        self.solver.train_parallel(batch, num_threads,
+                                                    callback=self._progress_callback)
+                        avg_regret = self.solver.average_regret_pct()
+                        iters = self.solver.iterations_done
+                        self.root.after(0, lambda r=avg_regret, i=iters: self.status_var.set(
+                            f"Range exploit: {desc} — {i} iters, regret: {r:.2f}% pot"))
+                        if avg_regret <= target_regret:
+                            break
+                except StopIteration:
+                    pass
+                except Exception as e:
+                    self.root.after(0, lambda: messagebox.showerror("Solver Error", str(e)))
+                finally:
+                    self.root.after(0, self._solver_done)
+
+            self._thread = threading.Thread(target=exploit_worker, daemon=True)
+            self._thread.start()
 
         def undo_exploit():
             self.solver.undo_range_lock_exploit()
@@ -1115,7 +1152,11 @@ class SolverGUI:
                 total_eq = (weights * equity).sum()
             else:
                 total_eq = equity.mean()
-            self.ax.text(1.01, 0.0, f"EQ: {total_eq:.1%}", transform=self.ax.transAxes,
+            legend = self.ax.get_legend()
+            legend_bottom = legend.get_window_extent(self.fig.canvas.get_renderer())
+            legend_bottom_ax = self.ax.transAxes.inverted().transform((0, legend_bottom.y0))[1]
+            self.ax.text(1.01, legend_bottom_ax - 0.03, f"EQ: {total_eq:.1%}",
+                         transform=self.ax.transAxes,
                          fontsize=9, fontweight='bold', va='top',
                          bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.9))
         self.fig.subplots_adjust(right=0.82)

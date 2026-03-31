@@ -9,12 +9,23 @@ from game import GameState, Action
 def _shared_worker(config, initial_reach, node_locks, strategy_locks,
                    index_map, n_actions_map, D, max_actions,
                    regret_shm_name, strategy_shm_name, arr_shape,
-                   iterations, progress_counter):
+                   iterations, progress_counter,
+                   locked_shm_name=None, locked_keys=None):
     """Worker: run CFR iterations reading/writing shared memory arrays."""
     regret_shm = shared_memory.SharedMemory(name=regret_shm_name)
     strategy_shm = shared_memory.SharedMemory(name=strategy_shm_name)
     regret_arr = np.ndarray(arr_shape, dtype=np.float64, buffer=regret_shm.buf)
     strategy_arr = np.ndarray(arr_shape, dtype=np.float64, buffer=strategy_shm.buf)
+
+    locked_shm = None
+    if locked_shm_name and locked_keys:
+        locked_shm = shared_memory.SharedMemory(name=locked_shm_name)
+        locked_arr = np.ndarray(arr_shape, dtype=np.float64, buffer=locked_shm.buf)
+        strategy_locks = {}
+        for key in locked_keys:
+            idx = index_map[key]
+            na = n_actions_map[key]
+            strategy_locks[key] = locked_arr[idx, :, :na]
 
     N = config.num_players
 
@@ -30,6 +41,8 @@ def _shared_worker(config, initial_reach, node_locks, strategy_locks,
 
     regret_shm.close()
     strategy_shm.close()
+    if locked_shm:
+        locked_shm.close()
 
 
 def _cfr_shared(state, reach, traverser, D, N, regret_arr, strategy_arr,
@@ -294,15 +307,33 @@ class CFRSolver:
             per_worker.append(n)
             left -= n
 
+        # Put strategy locks in shared memory to avoid pickling numpy arrays
+        locked_shm = None
+        locked_shm_name = None
+        locked_keys = None
+        locks_to_pass = self.strategy_locks
+        if self.strategy_locks:
+            locked_shm = shared_memory.SharedMemory(create=True, size=nbytes)
+            locked_arr = np.ndarray(shape, dtype=np.float64, buffer=locked_shm.buf)
+            locked_arr[:] = 0.0
+            for key, strat in self.strategy_locks.items():
+                idx = self._index_map[key]
+                na = self._n_actions_map[key]
+                locked_arr[idx, :, :na] = strat
+            locked_shm_name = locked_shm.name
+            locked_keys = frozenset(self.strategy_locks.keys())
+            locks_to_pass = {}
+
         # Spawn workers
         processes = []
         for n in per_worker:
             if n <= 0:
                 continue
             p = Process(target=_shared_worker, args=(
-                self.config, self.initial_reach, self.node_locks, self.strategy_locks,
+                self.config, self.initial_reach, self.node_locks, locks_to_pass,
                 self._index_map, self._n_actions_map, self.D, self._max_actions,
-                regret_shm.name, strategy_shm.name, shape, n, progress))
+                regret_shm.name, strategy_shm.name, shape, n, progress,
+                locked_shm_name, locked_keys))
             p.start()
             processes.append(p)
 
@@ -332,6 +363,9 @@ class CFRSolver:
         regret_shm.unlink()
         strategy_shm.close()
         strategy_shm.unlink()
+        if locked_shm:
+            locked_shm.close()
+            locked_shm.unlink()
 
     # ── CFR traversal (single-thread, uses self arrays) ─────────
 
@@ -509,6 +543,14 @@ class CFRSolver:
         if self.regret_data is not None:
             self.regret_data[:] = 0.0
             self.strategy_data[:] = 0.0
+
+    def average_regret_pct(self):
+        """Average positive regret as % of pot."""
+        if self.regret_data is None or self.iterations_done == 0:
+            return float('inf')
+        pos_regret = np.maximum(self.regret_data, 0.0).sum()
+        normalized = pos_regret / (self._n_info_sets * self.D * self.iterations_done)
+        return normalized / self.config.starting_pot * 100.0
 
     # ── Analysis ────────────────────────────────────────────────
 
