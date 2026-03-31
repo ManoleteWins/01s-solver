@@ -374,6 +374,8 @@ class SolverGUI:
         self._running = False
         self.run_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
+        if self.solver is None:
+            return
         locks_str = f", {len(self.solver.node_locks)} locks" if self.solver.node_locks else ""
         self.status_var.set(f"Done — {self.solver.iterations_done} iterations{locks_str}")
         self._populate_results()
@@ -1103,6 +1105,19 @@ class SolverGUI:
         self.ax.set_title(title, fontsize=10)
         self.ax.legend(loc='upper left', fontsize=8, bbox_to_anchor=(1.01, 1),
                        borderaxespad=0, framealpha=0.9)
+        # Total equity of range (reach-weighted average)
+        if equity is not None:
+            reach = self.solver.compute_reach_at_node(history)
+            player_reach = reach[player]
+            total_reach = player_reach.sum()
+            if total_reach > 0:
+                weights = player_reach / total_reach
+                total_eq = (weights * equity).sum()
+            else:
+                total_eq = equity.mean()
+            self.ax.text(1.01, 0.0, f"EQ: {total_eq:.1%}", transform=self.ax.transAxes,
+                         fontsize=9, fontweight='bold', va='top',
+                         bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.9))
         self.fig.subplots_adjust(right=0.82)
         self.ax.grid(True, alpha=0.3)
 
