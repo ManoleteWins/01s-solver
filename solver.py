@@ -623,6 +623,89 @@ class CFRSolver:
                 equity *= cdf_shifted
         return equity
 
+    def compute_ev(self, history):
+        """Compute per-hand EV for the acting player at this node.
+
+        Returns (ev_array, pot) where ev_array[i] is the EV in chips for hand i,
+        and pot is the pot size at this node.  Returns (None, None) if the node
+        is not found.
+        """
+        if history not in {h for (_, h) in self.info_sets}:
+            return None, None
+        player = None
+        for (p, h) in self.info_sets:
+            if h == history:
+                player = p
+                break
+        if player is None:
+            return None, None
+
+        reach = self.compute_reach_at_node(history)
+
+        # Replay game state to this node
+        state = GameState(self.config)
+        idx = 0
+        while idx < len(history):
+            if state.is_terminal():
+                break
+            action_key = history[idx]
+            if action_key == '|':
+                idx += 1
+                continue
+            actions = state.available_actions()
+            for action in actions:
+                if action.key() == action_key:
+                    state = state.apply(action)
+                    break
+            idx += 1
+            while idx < len(history) and history[idx] == '|':
+                idx += 1
+
+        pot = state.pot
+
+        # Tree walk for counterfactual values
+        cf_values = self._ev_walk(state, reach, player)
+
+        # Normalise by opponent reach product to get per-hand EV in chips
+        opp_product = 1.0
+        for p in range(self.N):
+            if p != player:
+                opp_product *= reach[p].sum()
+
+        if opp_product > 1e-15:
+            ev = cf_values / opp_product
+        else:
+            ev = np.zeros(self.D)
+
+        return ev, pot
+
+    def _ev_walk(self, state, reach, traverser):
+        """Recursive tree walk computing counterfactual values using average strategies."""
+        if state.is_terminal():
+            return self._terminal_value(state, reach, traverser)
+
+        player = state.current_player()
+        actions = state.available_actions()
+        num_actions = len(actions)
+        strategy = self.get_average_strategy(player, state.history, num_actions)
+
+        if player == traverser:
+            action_values = np.zeros((num_actions, self.D))
+            for a_idx, action in enumerate(actions):
+                new_state = state.apply(action)
+                new_reach = [r.copy() for r in reach]
+                new_reach[traverser] = new_reach[traverser] * strategy[:, a_idx]
+                action_values[a_idx] = self._ev_walk(new_state, new_reach, traverser)
+            return np.einsum('ad,da->d', action_values, strategy)
+        else:
+            total_value = np.zeros(self.D)
+            for a_idx, action in enumerate(actions):
+                new_state = state.apply(action)
+                new_reach = [r.copy() for r in reach]
+                new_reach[player] = new_reach[player] * strategy[:, a_idx]
+                total_value += self._ev_walk(new_state, new_reach, traverser)
+            return total_value
+
     def format_history(self, history):
         if not history:
             return "(root)"

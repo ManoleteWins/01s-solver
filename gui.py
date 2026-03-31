@@ -1082,6 +1082,7 @@ class SolverGUI:
 
     def _plot_strategy(self, player: int, history: tuple, actions, strategy: np.ndarray):
         """Stacked area chart of action probabilities vs hand value."""
+        self._annotation = None
         self.ax.clear()
 
         x = self.solver.hand_values
@@ -1134,6 +1135,13 @@ class SolverGUI:
             self.ax.plot(x, equity, color='black', linewidth=2, linestyle='--',
                          label='Equity', zorder=10)
 
+        # EV overlay (% of pot, capped at 1)
+        ev_raw, ev_pot = self.solver.compute_ev(history)
+        if ev_raw is not None and ev_pot > 0:
+            ev_pct = np.clip(ev_raw / ev_pot, None, 1.0)
+            self.ax.plot(x, ev_pct, color='white', linewidth=2, linestyle=':',
+                         label='EV (% pot)', zorder=10)
+
         self.ax.set_xlim(0, 1)
         self.ax.set_ylim(0, 1)
         self.ax.set_xlabel("")
@@ -1142,20 +1150,26 @@ class SolverGUI:
         self.ax.set_title(title, fontsize=10)
         self.ax.legend(loc='upper left', fontsize=8, bbox_to_anchor=(1.01, 1),
                        borderaxespad=0, framealpha=0.9)
-        # Total equity of range (reach-weighted average)
+        # Total equity and EV of range (reach-weighted averages)
+        reach = self.solver.compute_reach_at_node(history)
+        player_reach = reach[player]
+        total_reach = player_reach.sum()
+        if total_reach > 0:
+            weights = player_reach / total_reach
+        else:
+            weights = np.ones(self.solver.D) / self.solver.D
+        info_lines = []
         if equity is not None:
-            reach = self.solver.compute_reach_at_node(history)
-            player_reach = reach[player]
-            total_reach = player_reach.sum()
-            if total_reach > 0:
-                weights = player_reach / total_reach
-                total_eq = (weights * equity).sum()
-            else:
-                total_eq = equity.mean()
+            total_eq = (weights * equity).sum()
+            info_lines.append(f"EQ: {total_eq:.1%}")
+        if ev_raw is not None and ev_pot > 0:
+            total_ev_pct = (weights * ev_raw).sum() / ev_pot
+            info_lines.append(f"EV: {total_ev_pct:+.1%} pot")
+        if info_lines:
             legend = self.ax.get_legend()
             legend_bottom = legend.get_window_extent(self.fig.canvas.get_renderer())
             legend_bottom_ax = self.ax.transAxes.inverted().transform((0, legend_bottom.y0))[1]
-            self.ax.text(1.01, legend_bottom_ax - 0.03, f"EQ: {total_eq:.1%}",
+            self.ax.text(1.01, legend_bottom_ax - 0.03, "\n".join(info_lines),
                          transform=self.ax.transAxes,
                          fontsize=9, fontweight='bold', va='top',
                          bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.9))
@@ -1212,7 +1226,7 @@ class SolverGUI:
         self.ax_range.grid(True, alpha=0.3)
 
         # Store data for hover tooltip
-        self._hover_data = (strategy, actions, equity, density)
+        self._hover_data = (strategy, actions, equity, density, ev_raw, ev_pot)
 
         self.canvas.draw()
 
@@ -1238,7 +1252,7 @@ class SolverGUI:
                 self.canvas.draw_idle()
             return
 
-        strategy, actions, equity, density = self._hover_data
+        strategy, actions, equity, density, ev_raw, ev_pot = self._hover_data
         D = self.solver.D
         hand_values = self.solver.hand_values
 
@@ -1253,6 +1267,8 @@ class SolverGUI:
             lines.append(f"  {action.label()}: {pct:.1f}%")
         if equity is not None:
             lines.append(f"  Equity: {equity[idx]:.1%}")
+        if ev_raw is not None and ev_pot > 0:
+            lines.append(f"  EV: {ev_raw[idx] / ev_pot:+.1%} pot")
         if density is not None:
             lines.append(f"  Density: {density[idx]:.4f}")
         text = "\n".join(lines)
@@ -1274,6 +1290,7 @@ class SolverGUI:
 
     def _clear_plot(self):
         self._hover_data = None
+        self._annotation = None
         self.ax.clear()
         self.ax.set_xlim(0, 1)
         self.ax.set_ylim(0, 1)
