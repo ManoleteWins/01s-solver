@@ -16,7 +16,7 @@ class SolverGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("[0,1] Multi-Street CFR Solver")
-        self.root.geometry("1200x800")
+        self.root.geometry("1400x800")
 
         self.solver: Optional[CFRSolver] = None
         self._running = False
@@ -34,30 +34,40 @@ class SolverGUI:
 
     def _build_ui(self):
         # Main horizontal panes
-        paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
+        paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, sashwidth=5, bg='#cccccc')
         paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # Left: config
-        left = ttk.Frame(paned, width=380)
-        paned.add(left, weight=0)
+        left = ttk.Frame(paned, width=450)
+        paned.add(left, minsize=450, stretch="never")
 
         # Right: results
         right = ttk.Frame(paned)
-        paned.add(right, weight=1)
+        paned.add(right, stretch="always")
 
         self._build_config_panel(left)
         self._build_results_panel(right)
 
     def _build_config_panel(self, parent: ttk.Frame):
-        canvas = tk.Canvas(parent, width=360)
+        canvas = tk.Canvas(parent, width=430)
         scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=canvas.yview)
         self.config_frame = ttk.Frame(canvas)
 
         self.config_frame.bind(
             "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
-        canvas.create_window((0, 0), window=self.config_frame, anchor="nw")
+        self._config_canvas_win = canvas.create_window((0, 0), window=self.config_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
+
+        # Keep inner frame width matched to canvas width
+        def _on_canvas_resize(e):
+            canvas.itemconfigure(self._config_canvas_win, width=e.width)
+        canvas.bind("<Configure>", _on_canvas_resize)
+
+        # Mousewheel scrolling
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -151,20 +161,14 @@ class SolverGUI:
     BOARD_PRESETS = {
         'Brick': [IntervalMapping(0.0, 1.0, 0.0, 1.0)],
         'Draw completes': [
-            IntervalMapping(0.0, 0.2, 0.0, 0.2),
-            IntervalMapping(0.2, 0.4, 0.8, 1.0),
-            IntervalMapping(0.4, 1.0, 0.2, 0.8),
+            IntervalMapping(0.0, 0.25, 0.0, 0.25),
+            IntervalMapping(0.25, 0.5, 0.75, 1.0),
+            IntervalMapping(0.5, 1.0, 0.25, 0.75),
         ],
-        'Reverse': [IntervalMapping(0.0, 1.0, 1.0, 0.0)],
-        'Polarize': [
-            IntervalMapping(0.0, 0.3, 0.0, 0.45),
-            IntervalMapping(0.3, 0.7, 0.45, 0.55),
-            IntervalMapping(0.7, 1.0, 0.55, 1.0),
-        ],
-        'Top collapses': [
-            IntervalMapping(0.0, 0.6, 0.0, 0.6),
-            IntervalMapping(0.6, 0.8, 0.6, 0.65),
-            IntervalMapping(0.8, 1.0, 0.65, 1.0),
+        'Catchers improve': [
+            IntervalMapping(0.0, 0.5, 0.0, 0.5),
+            IntervalMapping(0.5, 0.75, 0.75, 1.0),
+            IntervalMapping(0.75, 1.0, 0.5, 0.75),
         ],
     }
 
@@ -257,12 +261,13 @@ class SolverGUI:
                     weight_var = tk.StringVar(value=weight)
                     mappings_var = tk.StringVar(value=mappings_str)
 
-                    ttk.Label(board_frame, text="Name:").pack(side=tk.LEFT, padx=1)
-                    ttk.Entry(board_frame, textvariable=name_var, width=12).pack(side=tk.LEFT, padx=1)
-                    ttk.Label(board_frame, text="Wt:").pack(side=tk.LEFT, padx=1)
-                    ttk.Entry(board_frame, textvariable=weight_var, width=4).pack(side=tk.LEFT, padx=1)
-                    ttk.Label(board_frame, text="Map:").pack(side=tk.LEFT, padx=1)
-                    ttk.Entry(board_frame, textvariable=mappings_var, width=20).pack(side=tk.LEFT, padx=1)
+                    # Row 1: Name + Weight + Remove
+                    row1 = ttk.Frame(board_frame)
+                    row1.pack(fill=tk.X)
+                    ttk.Label(row1, text="Name:").pack(side=tk.LEFT, padx=1)
+                    ttk.Entry(row1, textvariable=name_var, width=12).pack(side=tk.LEFT, padx=1)
+                    ttk.Label(row1, text="Wt:").pack(side=tk.LEFT, padx=1)
+                    ttk.Entry(row1, textvariable=weight_var, width=4).pack(side=tk.LEFT, padx=1)
 
                     entry = {'name': name_var, 'weight': weight_var, 'mappings': mappings_var,
                              'frame': board_frame}
@@ -271,25 +276,36 @@ class SolverGUI:
                     def remove(e=entry, b=boards):
                         e['frame'].destroy()
                         b.remove(e)
-                    ttk.Button(board_frame, text="X", width=2, command=remove).pack(side=tk.LEFT, padx=1)
+                    ttk.Button(row1, text="X", width=2, command=remove).pack(side=tk.LEFT, padx=1)
+
+                    # Row 2: Mappings (full width)
+                    row2 = ttk.Frame(board_frame)
+                    row2.pack(fill=tk.X)
+                    ttk.Label(row2, text="Map:").pack(side=tk.LEFT, padx=1)
+                    ttk.Entry(row2, textvariable=mappings_var, width=40).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=1)
+
+                    # Separator line
+                    ttk.Separator(board_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=2)
 
                 btn_frame = ttk.Frame(trans_frame)
                 btn_frame.pack(fill=tk.X, padx=2, pady=2)
 
                 ttk.Button(btn_frame, text="+ Board",
                            command=lambda c=boards_container, b=transition_boards: add_board(c, b)
-                           ).pack(side=tk.LEFT, padx=2)
+                           ).grid(row=0, column=0, padx=1, pady=1)
 
-                # Preset buttons
-                for preset_name, preset_mappings in self.BOARD_PRESETS.items():
+                # Preset buttons in a wrapping grid
+                preset_items = list(self.BOARD_PRESETS.items())
+                for idx, (preset_name, preset_mappings) in enumerate(preset_items):
                     mappings_str = "; ".join(
                         f"{m.src_lo}-{m.src_hi} → {m.dst_lo}-{m.dst_hi}" for m in preset_mappings
                     )
+                    r, c = divmod(idx + 1, 3)
                     ttk.Button(
                         btn_frame, text=preset_name,
                         command=lambda c=boards_container, b=transition_boards,
                                        n=preset_name, ms=mappings_str: add_board(c, b, n, "1.0", ms)
-                    ).pack(side=tk.LEFT, padx=1)
+                    ).grid(row=r, column=c, padx=1, pady=1)
 
     def _build_results_panel(self, parent: ttk.Frame):
         # Breadcrumb path pills
@@ -629,10 +645,13 @@ class SolverGUI:
             player, _ = self._node_map[hist]
 
             # Build label: P{n} + what happened since last ancestor
+            # For the action breadcrumb, show which player PERFORMED the action
+            # (the previous ancestor's acting player), not who acts next.
             if i == 0:
                 label = f"P{player + 1}"
             else:
                 prev = ancestors[i - 1]
+                prev_player, _ = self._node_map[prev]
                 segment = hist[len(prev):]
                 # Replace board tokens with board names
                 display_parts = []
@@ -655,10 +674,10 @@ class SolverGUI:
                         display_parts.append(s)
                 has_street = '|' in segment
                 action_text = " ".join(display_parts) if display_parts else ""
-                prefix = f"P{player + 1}"
+                prefix = f"P{prev_player + 1}"
                 if has_street:
                     street_num = sum(1 for s in hist if s == '|') + 1
-                    prefix = f"St{street_num} P{player + 1}"
+                    prefix = f"St{street_num} P{prev_player + 1}"
                 label = f"{prefix}: {action_text}" if action_text else prefix
 
             # Mark locked nodes in breadcrumb
@@ -1300,7 +1319,11 @@ class SolverGUI:
         self._annotation = None
         self.ax.clear()
 
-        x = self.solver.hand_values
+        # Use remapped hand values after board transitions
+        x_raw = self.solver.get_effective_hand_values(history)
+        sort_idx = np.argsort(x_raw)
+        x = x_raw[sort_idx]
+        strategy = strategy[sort_idx]
         labels = [a.label() for a in actions]
 
         # Color mapping: check/call = green, fold = blue, bet/raise/allin = reds
@@ -1347,11 +1370,14 @@ class SolverGUI:
         # Equity overlay
         equity = self.solver.compute_equity(history)
         if equity is not None:
+            equity = equity[sort_idx]
             self.ax.plot(x, equity, color='black', linewidth=2, linestyle='--',
                          label='Equity', zorder=10)
 
         # EV overlay (% of pot, capped at 1)
         ev_raw, ev_pot = self.solver.compute_ev(history)
+        if ev_raw is not None:
+            ev_raw = ev_raw[sort_idx]
         if ev_raw is not None and ev_pot > 0:
             ev_pct = np.clip(ev_raw / ev_pot, None, 1.0)
             self.ax.plot(x, ev_pct, color='blue', linewidth=2, linestyle=':',
@@ -1367,7 +1393,7 @@ class SolverGUI:
                        borderaxespad=0, framealpha=0.9)
         # Total equity and EV of range (reach-weighted averages)
         reach = self.solver.compute_reach_at_node(history)
-        player_reach = reach[player]
+        player_reach = reach[player][sort_idx]
         total_reach = player_reach.sum()
         if total_reach > 0:
             weights = player_reach / total_reach
@@ -1393,11 +1419,11 @@ class SolverGUI:
 
         # Aggregate frequency bar
         self.ax_freq.clear()
-        reach = self.solver.compute_reach_at_node(history)
-        player_reach = reach[player]
-        total_reach = player_reach.sum()
-        if total_reach > 0:
-            weights = player_reach / total_reach
+        reach2 = self.solver.compute_reach_at_node(history)
+        player_reach2 = reach2[player][sort_idx]
+        total_reach2 = player_reach2.sum()
+        if total_reach2 > 0:
+            weights = player_reach2 / total_reach2
         else:
             weights = np.ones(self.solver.D) / self.solver.D
 
@@ -1441,7 +1467,7 @@ class SolverGUI:
         self.ax_range.grid(True, alpha=0.3)
 
         # Store data for hover tooltip
-        self._hover_data = (strategy, actions, equity, density, ev_raw, ev_pot)
+        self._hover_data = (strategy, actions, equity, density, ev_raw, ev_pot, x)
 
         self.canvas.draw()
 
@@ -1467,12 +1493,11 @@ class SolverGUI:
                 self.canvas.draw_idle()
             return
 
-        strategy, actions, equity, density, ev_raw, ev_pot = self._hover_data
+        strategy, actions, equity, density, ev_raw, ev_pot, hand_values = self._hover_data
         D = self.solver.D
-        hand_values = self.solver.hand_values
 
-        # Find nearest bucket
-        idx = int(np.clip(np.round(x * D - 0.5), 0, D - 1))
+        # Find nearest bucket by actual plotted hand values
+        idx = int(np.argmin(np.abs(hand_values - x)))
         hand_val = hand_values[idx]
 
         # Build tooltip text

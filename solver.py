@@ -285,7 +285,7 @@ class CFRSolver:
             sort_order = np.argsort(effective, kind='stable')
             inv_order = np.empty_like(sort_order)
             inv_order[sort_order] = np.arange(self.D)
-            self._board_precomputed[board_path] = (sort_order, inv_order)
+            self._board_precomputed[board_path] = (sort_order, inv_order, effective)
 
     def _get_transition(self, street: int):
         """Get the transition config for moving from `street` to `street+1`."""
@@ -563,7 +563,7 @@ class CFRSolver:
                 F *= np.sum(reach[j])
         win_weight = np.ones(D)
         if state.board_path and state.board_path in self._board_precomputed:
-            sort_order, inv_order = self._board_precomputed[state.board_path]
+            sort_order, inv_order, _ = self._board_precomputed[state.board_path]
             for opp in active_opponents:
                 opp_sorted = reach[opp][sort_order]
                 cdf = np.cumsum(opp_sorted)
@@ -768,25 +768,19 @@ class CFRSolver:
                 path.append(int(h.split(':')[1]))
         return tuple(path)
 
-    def compute_equity(self, history):
-        if history not in {h for (_, h) in self.info_sets}:
-            return None
-        player = None
-        for (p, h) in self.info_sets:
-            if h == history:
-                player = p
-                break
-        if player is None:
-            return None
-        reach = self.compute_reach_at_node(history)
-        state = self._replay_state(history)
-        active_opponents = [p for p in state.active_players() if p != player]
-        if not active_opponents:
-            return np.ones(self.D)
-        equity = np.ones(self.D)
+    def get_effective_hand_values(self, history):
+        """Return hand values remapped by board transitions in the history."""
         board_path = self._get_board_path_from_history(history)
         if board_path and board_path in self._board_precomputed:
-            sort_order, inv_order = self._board_precomputed[board_path]
+            _, _, effective = self._board_precomputed[board_path]
+            return effective
+        return self.hand_values
+
+    def _showdown_equity_for_board(self, reach, player, active_opponents, board_path):
+        """Compute showdown equity given a specific full board path."""
+        equity = np.ones(self.D)
+        if board_path and board_path in self._board_precomputed:
+            sort_order, inv_order, _ = self._board_precomputed[board_path]
             for opp in active_opponents:
                 opp_total = reach[opp].sum()
                 if opp_total > 1e-15:
@@ -803,6 +797,67 @@ class CFRSolver:
                     cdf_shifted = np.zeros(self.D)
                     cdf_shifted[1:] = cdf[:-1]
                     equity *= cdf_shifted
+        return equity
+
+    def compute_equity(self, history):
+        if history not in {h for (_, h) in self.info_sets}:
+            return None
+        player = None
+        for (p, h) in self.info_sets:
+            if h == history:
+                player = p
+                break
+        if player is None:
+            return None
+        reach = self.compute_reach_at_node(history)
+        state = self._replay_state(history)
+        active_opponents = [p for p in state.active_players() if p != player]
+        if not active_opponents:
+            return np.ones(self.D)
+
+        current_board_path = self._get_board_path_from_history(history)
+        current_street = state.street
+        n_streets = self.config.num_streets
+        remaining_transitions = list(range(current_street, n_streets - 1))
+
+        if not remaining_transitions:
+            # Already on last street — just compute showdown equity on current board
+            return self._showdown_equity_for_board(reach, player, active_opponents, current_board_path)
+
+        # Enumerate all possible future board paths and weight-average equity
+        # Each remaining transition has multiple board states with weights
+        future_branches = [(current_board_path, 1.0)]
+        for trans_idx in remaining_transitions:
+            if trans_idx >= len(self.config.transition_configs):
+                break
+            tc = self.config.transition_configs[trans_idx]
+            total_weight = sum(bs.weight for bs in tc.board_states)
+            if total_weight <= 0:
+                continue
+            new_branches = []
+            for path, prob in future_branches:
+                for board_i, bs in enumerate(tc.board_states):
+                    new_path = path + (board_i,)
+                    new_prob = prob * (bs.weight / total_weight)
+                    # Ensure this board path is precomputed
+                    if new_path not in self._board_precomputed:
+                        effective = self.hand_values.copy()
+                        for step, bi in enumerate(new_path):
+                            tc2 = self.config.transition_configs[step]
+                            bs2 = tc2.board_states[bi]
+                            effective = np.array([bs2.remap_value(v) for v in effective])
+                        sort_order = np.argsort(effective, kind='stable')
+                        inv_order = np.empty_like(sort_order)
+                        inv_order[sort_order] = np.arange(self.D)
+                        self._board_precomputed[new_path] = (sort_order, inv_order, effective)
+                    new_branches.append((new_path, new_prob))
+            future_branches = new_branches
+
+        # Weight-average equity across all final board paths
+        equity = np.zeros(self.D)
+        for path, prob in future_branches:
+            eq = self._showdown_equity_for_board(reach, player, active_opponents, path)
+            equity += prob * eq
         return equity
 
     def compute_ev(self, history):
